@@ -8,8 +8,13 @@ from database import (
     get_device_history, get_all_known_devices, calculate_device_category,
     record_scan, get_database_stats, get_total_scans, update_device_notes,
     log_categorization, get_categorization_log, save_port_scan_results,
-    get_latest_port_scan
+    get_latest_port_scan, update_device_os, update_device_os_error,
+    update_device_ssdp, log_scan_event
 )
+from oui_lookup import get_vendor_for_mac
+from os_scanner import scan_os
+from service_scanner import scan_services
+from ssdp_scanner import discover_ssdp
 import uvicorn
 import logging
 import sys
@@ -97,11 +102,12 @@ def compare_devices(current_devices, previous_devices, scan_id: int, grace_scans
         mac = device['mac']
         hostname = device['hostname']
 
-        # Update database
-        update_device(ip, mac, hostname, is_online=True)
-
         # Get device history
         history = get_device_history(ip)
+        vendor = get_vendor_for_mac(mac) or (history.get('vendor') if history else None)
+
+        # Update database
+        update_device(ip, mac, hostname, vendor=vendor, is_online=True)
 
         # Calculate category with reason (online device)
         # Pass consecutive_online for streak-based upgrades
@@ -123,12 +129,38 @@ def compare_devices(current_devices, previous_devices, scan_id: int, grace_scans
             device['scans_seen_online'] = history['scans_seen_online']
             device['appearance_rate'] = history['scans_seen_online'] / history['total_scans'] if history['total_scans'] > 0 else 0
             device['notes'] = history.get('notes', '')
+            device['vendor'] = history.get('vendor') or vendor or ''
+            device['os_guess'] = history.get('os_guess') or ''
+            device['os_accuracy'] = history.get('os_accuracy')
+            device['os_scanned_at'] = history.get('os_scanned_at')
+            device['os_last_error'] = history.get('os_last_error') or ''
+            device['os_last_error_at'] = history.get('os_last_error_at')
+            device['last_port_scan_at'] = history.get('last_port_scan_at')
+            device['last_port_scan_count'] = history.get('last_port_scan_count', 0)
+            device['ssdp_server'] = history.get('ssdp_server') or ''
+            device['ssdp_location'] = history.get('ssdp_location') or ''
+            device['ssdp_st'] = history.get('ssdp_st') or ''
+            device['ssdp_usn'] = history.get('ssdp_usn') or ''
+            device['ssdp_scanned_at'] = history.get('ssdp_scanned_at')
         else:
             device['first_seen'] = now.isoformat()
             device['total_scans'] = 1
             device['scans_seen_online'] = 1
             device['appearance_rate'] = 1.0
             device['notes'] = ''
+            device['vendor'] = vendor or ''
+            device['os_guess'] = ''
+            device['os_accuracy'] = None
+            device['os_scanned_at'] = None
+            device['os_last_error'] = ''
+            device['os_last_error_at'] = None
+            device['last_port_scan_at'] = None
+            device['last_port_scan_count'] = 0
+            device['ssdp_server'] = ''
+            device['ssdp_location'] = ''
+            device['ssdp_st'] = ''
+            device['ssdp_usn'] = ''
+            device['ssdp_scanned_at'] = None
 
         # Log categorization decision
         log_categorization(
@@ -151,15 +183,17 @@ def compare_devices(current_devices, previous_devices, scan_id: int, grace_scans
     for ip, prev_device in prev_ips.items():
         if ip not in curr_ips:
             # Update database (mark as seen but offline)
+            # Get updated history
+            history = get_device_history(ip)
+            vendor = history.get('vendor') if history else None
+
             update_device(
                 ip,
                 prev_device.get('mac', 'unknown'),
                 prev_device.get('hostname', 'Unknown'),
+                vendor=vendor,
                 is_online=False
             )
-
-            # Get updated history
-            history = get_device_history(ip)
 
             # Increment missed scans counter
             missed_scans = prev_device.get('missed_scans', 0) + 1
@@ -178,6 +212,19 @@ def compare_devices(current_devices, previous_devices, scan_id: int, grace_scans
                     offline_device['scans_seen_online'] = history['scans_seen_online']
                     offline_device['appearance_rate'] = history['scans_seen_online'] / history['total_scans'] if history['total_scans'] > 0 else 0
                     offline_device['notes'] = history.get('notes', '')
+                    offline_device['vendor'] = history.get('vendor') or ''
+                    offline_device['os_guess'] = history.get('os_guess') or ''
+                    offline_device['os_accuracy'] = history.get('os_accuracy')
+                    offline_device['os_scanned_at'] = history.get('os_scanned_at')
+                    offline_device['os_last_error'] = history.get('os_last_error') or ''
+                    offline_device['os_last_error_at'] = history.get('os_last_error_at')
+                    offline_device['last_port_scan_at'] = history.get('last_port_scan_at')
+                    offline_device['last_port_scan_count'] = history.get('last_port_scan_count', 0)
+                    offline_device['ssdp_server'] = history.get('ssdp_server') or ''
+                    offline_device['ssdp_location'] = history.get('ssdp_location') or ''
+                    offline_device['ssdp_st'] = history.get('ssdp_st') or ''
+                    offline_device['ssdp_usn'] = history.get('ssdp_usn') or ''
+                    offline_device['ssdp_scanned_at'] = history.get('ssdp_scanned_at')
 
                     # Log categorization for offline device
                     log_categorization(
@@ -337,7 +384,20 @@ async def get_db_stats():
                 "scans_seen_online": d['scans_seen_online'],
                 "appearance_rate": round(d['scans_seen_online'] / d['total_scans'] * 100, 1) if d['total_scans'] > 0 else 0,
                 "category": calculate_device_category(d)[0],  # Get category from tuple
-                "notes": d.get('notes', '')
+                "notes": d.get('notes', ''),
+                "vendor": d.get('vendor', ''),
+                "os_guess": d.get('os_guess', ''),
+                "os_accuracy": d.get('os_accuracy'),
+                "os_scanned_at": d.get('os_scanned_at'),
+                "os_last_error": d.get('os_last_error', ''),
+                "os_last_error_at": d.get('os_last_error_at'),
+                "last_port_scan_at": d.get('last_port_scan_at'),
+                "last_port_scan_count": d.get('last_port_scan_count', 0),
+                "ssdp_server": d.get('ssdp_server', ''),
+                "ssdp_location": d.get('ssdp_location', ''),
+                "ssdp_st": d.get('ssdp_st', ''),
+                "ssdp_usn": d.get('ssdp_usn', ''),
+                "ssdp_scanned_at": d.get('ssdp_scanned_at')
             }
             for d in known_devices
         ]
@@ -368,19 +428,42 @@ async def update_notes(ip: str, notes: dict):
         return {"success": False, "message": str(e)}
 
 @app.post("/api/devices/{ip}/scan-ports")
-async def scan_device_ports(ip: str, timeout: float = 2.0, max_workers: int = 20):
+async def scan_device_ports(ip: str, timeout: float = 2.5, max_workers: int = 15, retries: int = 2, service_scan: bool = False):
     """Scan ports on a specific device"""
     try:
-        logger.info(f"Starting port scan for {ip} (timeout={timeout}s, workers={max_workers})")
+        logger.info(
+            f"Starting port scan for {ip} (timeout={timeout}s, workers={max_workers}, retries={retries}, "
+            f"service_scan={service_scan})"
+        )
 
         # Run port scan in thread pool to not block event loop
         loop = asyncio.get_event_loop()
         results = await loop.run_in_executor(
             None,
-            lambda: scan_ports(ip, timeout=timeout, max_workers=max_workers)
+            lambda: scan_ports(ip, timeout=timeout, max_workers=max_workers, retries=retries)
         )
 
         logger.info(f"Port scan complete for {ip}: {len(results)} open ports")
+
+        service_scan_error = None
+        if service_scan and results:
+            open_ports = [r['port'] for r in results]
+            service_data = await loop.run_in_executor(
+                None,
+                lambda: scan_services(ip, open_ports)
+            )
+            if service_data.get("error"):
+                service_scan_error = service_data["error"]
+                history = get_device_history(ip)
+                hostname = history.get('hostname') if history else ''
+                log_scan_event(ip, hostname or '', "service_scan", f"{ip}: {service_scan_error}")
+            else:
+                services = service_data.get("services", {})
+                for result in results:
+                    service_info = services.get(result["port"])
+                    if service_info:
+                        result["service"] = service_info.get("service") or result.get("service")
+                        result["details"] = service_info.get("details") or result.get("details")
 
         # Check if this device is running Pi-hole
         pihole_info = None
@@ -395,8 +478,7 @@ async def scan_device_ports(ip: str, timeout: float = 2.0, max_workers: int = 20
                 logger.info(f"✓ Pi-hole detected on {ip}: {pihole_info['admin_url']}")
 
         # Save results to database (including Pi-hole info)
-        if results:
-            save_port_scan_results(ip, results, pihole_info)
+        save_port_scan_results(ip, results, pihole_info)
 
         return {
             "success": True,
@@ -406,11 +488,53 @@ async def scan_device_ports(ip: str, timeout: float = 2.0, max_workers: int = 20
             "pihole": pihole_info,
             "config": {
                 "timeout": timeout,
-                "max_workers": max_workers
-            }
+                "max_workers": max_workers,
+                "retries": retries,
+                "service_scan": service_scan
+            },
+            "service_scan_error": service_scan_error
         }
     except Exception as e:
         logger.error(f"Error scanning ports for {ip}: {e}")
+        history = get_device_history(ip)
+        hostname = history.get('hostname') if history else ''
+        log_scan_event(ip, hostname or '', "port_scan", f"{ip}: {e}")
+        return {"success": False, "message": str(e)}
+
+@app.post("/api/devices/{ip}/scan-os")
+async def scan_device_os(ip: str, timeout: int = 30):
+    """Scan OS details for a specific device (requires nmap and sudo)"""
+    try:
+        logger.info(f"Starting OS scan for {ip} (timeout={timeout}s)")
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: scan_os(ip, timeout_seconds=timeout))
+
+        if result.get("error"):
+            error_message = f"{ip}: {result['error']}"
+            update_device_os_error(ip, error_message)
+            history = get_device_history(ip)
+            hostname = history.get('hostname') if history else ''
+            log_scan_event(ip, hostname or '', "os_scan", error_message)
+            return {"success": False, "message": error_message}
+
+        os_guess = result.get("os_guess")
+        os_accuracy = result.get("os_accuracy")
+        if os_guess:
+            update_device_os(ip, os_guess, os_accuracy)
+
+        return {
+            "success": True,
+            "ip": ip,
+            "os_guess": os_guess,
+            "os_accuracy": os_accuracy,
+            "os_scanned_at": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error scanning OS for {ip}: {e}")
+        history = get_device_history(ip)
+        hostname = history.get('hostname') if history else ''
+        log_scan_event(ip, hostname or '', "os_scan", f"{ip}: {e}")
         return {"success": False, "message": str(e)}
 
 @app.get("/api/devices/{ip}/ports")
@@ -435,6 +559,29 @@ async def get_device_ports(ip: str):
             }
     except Exception as e:
         logger.error(f"Error fetching port scan for {ip}: {e}")
+        return {"success": False, "message": str(e)}
+
+@app.post("/api/devices/{ip}/discover-ssdp")
+async def discover_device_ssdp(ip: str, timeout: float = 2.0):
+    """Discover SSDP/UPnP info for a device"""
+    try:
+        logger.info(f"Starting SSDP discovery for {ip} (timeout={timeout}s)")
+        loop = asyncio.get_event_loop()
+        responses = await loop.run_in_executor(None, lambda: discover_ssdp(ip, timeout))
+        info = responses.get(ip)
+        if info:
+            update_device_ssdp(ip, info)
+            return {"success": True, "ip": ip, "ssdp": info}
+        message = f"{ip}: No SSDP response received."
+        history = get_device_history(ip)
+        hostname = history.get('hostname') if history else ''
+        log_scan_event(ip, hostname or '', "ssdp", message)
+        return {"success": False, "message": message}
+    except Exception as e:
+        logger.error(f"Error discovering SSDP for {ip}: {e}")
+        history = get_device_history(ip)
+        hostname = history.get('hostname') if history else ''
+        log_scan_event(ip, hostname or '', "ssdp", f"{ip}: {e}")
         return {"success": False, "message": str(e)}
 
 @app.websocket("/ws")

@@ -1,7 +1,27 @@
 import { useState, useEffect, useRef } from 'react'
 import './App.css'
 
+const SETTINGS_STORAGE_KEY = 'local-network-ui-settings'
+
+const loadSettings = () => {
+  try {
+    const raw = localStorage.getItem(SETTINGS_STORAGE_KEY)
+    return raw ? JSON.parse(raw) : {}
+  } catch {
+    return {}
+  }
+}
+
+const saveSettings = (settings) => {
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings))
+  } catch {
+    // Ignore storage failures (private mode, quota, etc.)
+  }
+}
+
 function App() {
+  const initialSettings = typeof window !== 'undefined' ? loadSettings() : {}
   const [devices, setDevices] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -11,20 +31,30 @@ function App() {
   const [scanInterval, setScanInterval] = useState(30)
   const [countdown, setCountdown] = useState(null)
   const [scanLog, setScanLog] = useState([])
-  const [activeTab, setActiveTab] = useState('devices')
+  const [activeTab, setActiveTab] = useState(initialSettings.activeTab || 'devices')
   const [dbStats, setDbStats] = useState(null)
   const [catLog, setCatLog] = useState(null)
   const [editingNotes, setEditingNotes] = useState(null) // IP of device being edited
-  const [sortColumn, setSortColumn] = useState('ip')
-  const [sortDirection, setSortDirection] = useState('asc')
+  const [sortColumn, setSortColumn] = useState(initialSettings.sortColumn || 'ip')
+  const [sortDirection, setSortDirection] = useState(initialSettings.sortDirection || 'asc')
   const [expandedDevice, setExpandedDevice] = useState(null) // IP of expanded device
   const [portScanResults, setPortScanResults] = useState({}) // Map of IP -> port scan results
   const [scanningPorts, setScanningPorts] = useState({}) // Map of IP -> scanning status
-  const [portScanTimeout, setPortScanTimeout] = useState(2.0)
-  const [portScanWorkers, setPortScanWorkers] = useState(20)
+  const [portScanTimeout, setPortScanTimeout] = useState(initialSettings.portScanTimeout ?? 2.5)
+  const [portScanWorkers, setPortScanWorkers] = useState(initialSettings.portScanWorkers ?? 15)
+  const [portScanRetries, setPortScanRetries] = useState(initialSettings.portScanRetries ?? 2)
+  const [serviceScanEnabled, setServiceScanEnabled] = useState(initialSettings.serviceScanEnabled ?? false)
+  const [startupFullScanEnabled, setStartupFullScanEnabled] = useState(initialSettings.startupFullScanEnabled ?? false)
+  const [startupFullScanBudgetSec, setStartupFullScanBudgetSec] = useState(initialSettings.startupFullScanBudgetSec ?? 120)
+  const [toast, setToast] = useState(null)
+  const [fullScanProgress, setFullScanProgress] = useState({ active: false, completed: 0, total: 0, label: '' })
+  const [scanningOS, setScanningOS] = useState({})
+  const [scanningSSDP, setScanningSSDP] = useState({})
   const wsRef = useRef(null)
   const reconnectTimeoutRef = useRef(null)
   const countdownIntervalRef = useRef(null)
+  const toastTimeoutRef = useRef(null)
+  const startupScanRunRef = useRef(false)
 
   const connectWebSocket = () => {
     try {
@@ -101,6 +131,40 @@ function App() {
     }
   }
 
+  const showToast = (message, type = 'info') => {
+    setToast({ message, type })
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current)
+    }
+    toastTimeoutRef.current = setTimeout(() => {
+      setToast(null)
+    }, 3500)
+  }
+
+  useEffect(() => {
+    saveSettings({
+      activeTab,
+      sortColumn,
+      sortDirection,
+      portScanTimeout,
+      portScanWorkers,
+      portScanRetries,
+      serviceScanEnabled,
+      startupFullScanEnabled,
+      startupFullScanBudgetSec
+    })
+  }, [
+    activeTab,
+    sortColumn,
+    sortDirection,
+    portScanTimeout,
+    portScanWorkers,
+    portScanRetries,
+    serviceScanEnabled,
+    startupFullScanEnabled,
+    startupFullScanBudgetSec
+  ])
+
   const fetchDbStats = async () => {
     try {
       const response = await fetch('http://localhost:8000/api/database/stats')
@@ -152,12 +216,14 @@ function App() {
     }
   }
 
-  const scanPorts = async (ip) => {
+  const scanPorts = async (ip, options = {}) => {
+    const { serviceScanOverride } = options
     try {
       // Set scanning state
       setScanningPorts(prev => ({ ...prev, [ip]: true }))
 
-      const response = await fetch(`http://localhost:8000/api/devices/${ip}/scan-ports?timeout=${portScanTimeout}&max_workers=${portScanWorkers}`, {
+      const serviceScan = serviceScanOverride !== undefined ? serviceScanOverride : serviceScanEnabled
+      const response = await fetch(`http://localhost:8000/api/devices/${ip}/scan-ports?timeout=${portScanTimeout}&max_workers=${portScanWorkers}&retries=${portScanRetries}&service_scan=${serviceScan}`, {
         method: 'POST'
       })
       const data = await response.json()
@@ -174,11 +240,80 @@ function App() {
         }))
         // Expand the device to show results
         setExpandedDevice(ip)
+        if (data.service_scan_error) {
+          showToast(data.service_scan_error, 'error')
+        }
+      } else {
+        showToast(data.message || `Port scan failed for ${ip}`, 'error')
       }
     } catch (err) {
       console.error('Failed to scan ports:', err)
+      showToast(`Port scan failed for ${ip}`, 'error')
     } finally {
       setScanningPorts(prev => ({ ...prev, [ip]: false }))
+    }
+  }
+
+  const scanOS = async (ip) => {
+    try {
+      setScanningOS(prev => ({ ...prev, [ip]: true }))
+      const response = await fetch(`http://localhost:8000/api/devices/${ip}/scan-os`, {
+        method: 'POST'
+      })
+      const data = await response.json()
+
+      if (data.success) {
+        setDevices(prev =>
+          prev.map(d => d.ip === ip ? {
+            ...d,
+            os_guess: data.os_guess || '',
+            os_accuracy: data.os_accuracy,
+            os_scanned_at: data.os_scanned_at,
+            os_last_error: ''
+          } : d)
+        )
+      } else {
+        const errorMessage = data.message || `OS scan failed for ${ip}`
+        setDevices(prev =>
+          prev.map(d => d.ip === ip ? { ...d, os_last_error: errorMessage } : d)
+        )
+        showToast(errorMessage, 'error')
+      }
+    } catch (err) {
+      console.error('OS scan failed:', err)
+      showToast(`OS scan failed for ${ip}`, 'error')
+    } finally {
+      setScanningOS(prev => ({ ...prev, [ip]: false }))
+    }
+  }
+
+  const scanSSDP = async (ip) => {
+    try {
+      setScanningSSDP(prev => ({ ...prev, [ip]: true }))
+      const response = await fetch(`http://localhost:8000/api/devices/${ip}/discover-ssdp`, {
+        method: 'POST'
+      })
+      const data = await response.json()
+
+      if (data.success && data.ssdp) {
+        setDevices(prev =>
+          prev.map(d => d.ip === ip ? {
+            ...d,
+            ssdp_server: data.ssdp.server || '',
+            ssdp_location: data.ssdp.location || '',
+            ssdp_st: data.ssdp.st || '',
+            ssdp_usn: data.ssdp.usn || '',
+            ssdp_scanned_at: new Date().toISOString()
+          } : d)
+        )
+      } else {
+        showToast(data.message || `SSDP discovery failed for ${ip}`, 'error')
+      }
+    } catch (err) {
+      console.error('SSDP discovery failed:', err)
+      showToast(`SSDP discovery failed for ${ip}`, 'error')
+    } finally {
+      setScanningSSDP(prev => ({ ...prev, [ip]: false }))
     }
   }
 
@@ -186,7 +321,7 @@ function App() {
     const onlineDevices = devices.filter(d => d.status === 'online')
 
     if (onlineDevices.length === 0) {
-      alert('No online devices to scan')
+      showToast('No online devices to scan', 'error')
       return
     }
 
@@ -200,6 +335,53 @@ function App() {
       // Small delay between devices
       await new Promise(resolve => setTimeout(resolve, 500))
     }
+  }
+
+  const runStartupFullScan = async (onlineDevices) => {
+    if (!onlineDevices.length) {
+      showToast('No online devices to scan', 'error')
+      return
+    }
+
+    const totalSteps = onlineDevices.length * 3
+    setFullScanProgress({ active: true, completed: 0, total: totalSteps, label: 'Running full scan' })
+
+    const budgetMs = Math.max(30, startupFullScanBudgetSec) * 1000
+    const startTime = Date.now()
+
+    let completed = 0
+    for (const device of onlineDevices) {
+      if (Date.now() - startTime > budgetMs) {
+        showToast('Full scan exceeded time budget', 'error')
+        break
+      }
+
+      await scanPorts(device.ip, { serviceScanOverride: true })
+      completed += 1
+      setFullScanProgress(prev => ({ ...prev, completed }))
+
+      if (Date.now() - startTime > budgetMs) {
+        showToast('Full scan exceeded time budget', 'error')
+        break
+      }
+
+      await scanOS(device.ip)
+      completed += 1
+      setFullScanProgress(prev => ({ ...prev, completed }))
+
+      if (Date.now() - startTime > budgetMs) {
+        showToast('Full scan exceeded time budget', 'error')
+        break
+      }
+
+      await scanSSDP(device.ip)
+      completed += 1
+      setFullScanProgress(prev => ({ ...prev, completed }))
+
+      await new Promise(resolve => setTimeout(resolve, 250))
+    }
+
+    setFullScanProgress(prev => ({ ...prev, active: false, label: '' }))
   }
 
   const toggleExpandDevice = (ip) => {
@@ -225,6 +407,9 @@ function App() {
     const sorted = [...devices].sort((a, b) => {
       let aVal = a[sortColumn]
       let bVal = b[sortColumn]
+
+      if (aVal === undefined || aVal === null) aVal = ''
+      if (bVal === undefined || bVal === null) bVal = ''
 
       // Handle special cases
       if (sortColumn === 'ip') {
@@ -252,10 +437,11 @@ function App() {
   const generateCSV = () => {
     if (!dbStats || !dbStats.devices) return ''
 
-    const headers = ['IP', 'Hostname', 'Total Scans', 'Scans Online', 'Appearance Rate (%)', 'Category', 'Notes']
+    const headers = ['IP', 'Hostname', 'Vendor', 'Total Scans', 'Scans Online', 'Appearance Rate (%)', 'Category', 'Notes']
     const rows = dbStats.devices.map(d => [
       d.ip,
       d.hostname,
+      d.vendor || '',
       d.total_scans,
       d.scans_seen_online,
       d.appearance_rate,
@@ -274,7 +460,7 @@ function App() {
   const copyCSV = () => {
     const csv = generateCSV()
     navigator.clipboard.writeText(csv)
-    alert('CSV copied to clipboard!')
+    showToast('CSV copied to clipboard', 'success')
   }
 
   const downloadCSV = () => {
@@ -286,7 +472,22 @@ function App() {
     a.download = `network-devices-${new Date().toISOString()}.csv`
     a.click()
     URL.revokeObjectURL(url)
+    showToast('CSV download started', 'success')
   }
+
+  useEffect(() => {
+    if (!startupFullScanEnabled || startupScanRunRef.current) {
+      return
+    }
+
+    if (!connected || devices.length === 0 || loading) {
+      return
+    }
+
+    const onlineDevices = devices.filter(d => d.status === 'online')
+    startupScanRunRef.current = true
+    runStartupFullScan(onlineDevices)
+  }, [startupFullScanEnabled, connected, devices, loading])
 
   // Countdown timer effect
   useEffect(() => {
@@ -355,8 +556,52 @@ function App() {
     <div className="container">
       <div className="header">
         <h1>Local Network Devices</h1>
-        <hr />
       </div>
+
+      {fullScanProgress.active && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            width: '100%',
+            height: '4px',
+            backgroundColor: '#e0e0e0',
+            zIndex: 9998
+          }}
+        >
+          <div
+            style={{
+              width: fullScanProgress.total > 0
+                ? `${(fullScanProgress.completed / fullScanProgress.total) * 100}%`
+                : '0%',
+              height: '100%',
+              backgroundColor: '#2e7d32',
+              transition: 'width 200ms linear'
+            }}
+          />
+        </div>
+      )}
+
+      {toast && (
+        <div
+          style={{
+            position: 'fixed',
+            top: '1rem',
+            right: '1rem',
+            backgroundColor: toast.type === 'error' ? '#c62828' : toast.type === 'success' ? '#2e7d32' : '#333',
+            color: '#fff',
+            padding: '0.75rem 1rem',
+            fontSize: '0.875rem',
+            borderRadius: '4px',
+            boxShadow: '0 6px 18px rgba(0, 0, 0, 0.2)',
+            zIndex: 9999,
+            maxWidth: '320px'
+          }}
+        >
+          {toast.message}
+        </div>
+      )}
 
       {error && (
         <div className="error-banner mb4">
@@ -403,6 +648,9 @@ function App() {
                       <th onClick={() => handleSort('mac')} style={{ cursor: 'pointer' }}>
                         MAC Address {sortColumn === 'mac' && (sortDirection === 'asc' ? '↑' : '↓')}
                       </th>
+                      <th onClick={() => handleSort('vendor')} style={{ cursor: 'pointer' }}>
+                        Vendor {sortColumn === 'vendor' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
                       <th onClick={() => handleSort('status')} style={{ cursor: 'pointer' }}>
                         Status {sortColumn === 'status' && (sortDirection === 'asc' ? '↑' : '↓')}
                       </th>
@@ -419,6 +667,10 @@ function App() {
 
                       const portResults = portScanResults[device.ip]
                       const isScanning = scanningPorts[device.ip]
+                      const isOSScanning = scanningOS[device.ip]
+                      const isSSDPScanning = scanningSSDP[device.ip]
+                      const hasPortScan = Boolean(portResults || device.last_port_scan_at)
+                      const hasOSScan = Boolean(device.os_guess || device.os_scanned_at)
                       const isExpanded = expandedDevice === device.ip
 
                       return (
@@ -439,10 +691,17 @@ function App() {
                                   🛡️ PI-HOLE
                                 </span>
                               )}
-                              {device.hostname}
+                              <div>{device.hostname}</div>
+                              {device.os_guess && (
+                                <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.15rem' }}>
+                                  OS: {device.os_guess}
+                                  {device.os_accuracy ? ` (${device.os_accuracy}%)` : ''}
+                                </div>
+                              )}
                             </td>
                             <td>{device.ip}</td>
                             <td>{device.mac}</td>
+                            <td>{device.vendor || '-'}</td>
                             <td>{device.status}</td>
                             <td>
                               {editingNotes === device.ip ? (
@@ -494,7 +753,33 @@ function App() {
                                   marginBottom: '0.25rem'
                                 }}
                               >
-                                {isScanning ? 'Scanning...' : 'Scan Ports'}
+                                {isScanning ? 'Scanning...' : (hasPortScan ? 'Rescan Ports' : 'Scan Ports')}
+                              </button>
+                              <button
+                                onClick={() => scanOS(device.ip)}
+                                disabled={isOSScanning || device.status === 'offline'}
+                                className="btn-classic"
+                                style={{
+                                  fontSize: '0.75rem',
+                                  padding: '0.25rem 0.5rem',
+                                  marginRight: '0.25rem',
+                                  marginBottom: '0.25rem'
+                                }}
+                              >
+                                {isOSScanning ? 'Scanning...' : (hasOSScan ? 'Rescan OS' : 'Scan OS')}
+                              </button>
+                              <button
+                                onClick={() => scanSSDP(device.ip)}
+                                disabled={isSSDPScanning || device.status === 'offline'}
+                                className="btn-classic"
+                                style={{
+                                  fontSize: '0.75rem',
+                                  padding: '0.25rem 0.5rem',
+                                  marginRight: '0.25rem',
+                                  marginBottom: '0.25rem'
+                                }}
+                              >
+                                {isSSDPScanning ? 'Scanning...' : (device.ssdp_scanned_at ? 'Rescan SSDP' : 'Discover SSDP')}
                               </button>
                               {portResults && (
                                 <button
@@ -532,7 +817,7 @@ function App() {
                           </tr>
                           {isExpanded && portResults && (
                             <tr key={`${device.ip}-ports`}>
-                              <td colSpan="6" style={{ padding: '1rem', backgroundColor: '#fafafa' }}>
+                              <td colSpan="7" style={{ padding: '1rem', backgroundColor: '#fafafa' }}>
                                 <div style={{ fontSize: '0.875rem', marginBottom: '0.5rem', fontWeight: 500 }}>
                                   Open Ports on {device.ip}
                                   <span style={{ color: '#666', fontWeight: 400, marginLeft: '0.5rem' }}>
@@ -551,20 +836,51 @@ function App() {
                                       🔍 DNS Server
                                     </span>
                                   )}
-                                  {portResults.pihole && (
-                                    <span style={{
-                                      marginLeft: '0.5rem',
-                                      padding: '0.25rem 0.5rem',
-                                      backgroundColor: '#1976d2',
-                                      color: '#fff',
-                                      fontSize: '0.75rem',
-                                      fontWeight: 500,
-                                      borderRadius: '3px'
-                                    }}>
-                                      🛡️ Pi-hole Detected!
+                                {portResults.pihole && (
+                                  <span style={{
+                                    marginLeft: '0.5rem',
+                                    padding: '0.25rem 0.5rem',
+                                    backgroundColor: '#1976d2',
+                                    color: '#fff',
+                                    fontSize: '0.75rem',
+                                    fontWeight: 500,
+                                    borderRadius: '3px'
+                                  }}>
+                                    🛡️ Pi-hole Detected!
+                                  </span>
+                                )}
+                              </div>
+                              {device.os_guess && (
+                                <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '0.75rem' }}>
+                                  OS Guess: <strong>{device.os_guess}</strong>
+                                  {device.os_accuracy ? ` (${device.os_accuracy}%)` : ''}
+                                  {device.os_scanned_at ? (
+                                    <span style={{ marginLeft: '0.5rem' }}>
+                                      (Scanned: {new Date(device.os_scanned_at).toLocaleString()})
+                                    </span>
+                                  ) : null}
+                                </div>
+                              )}
+                              {!device.os_guess && device.os_last_error && (
+                                <div style={{ fontSize: '0.75rem', color: '#a33', marginBottom: '0.75rem' }}>
+                                  Last OS scan error: {device.os_last_error}
+                                </div>
+                              )}
+                              {(device.ssdp_server || device.ssdp_location || device.ssdp_st) && (
+                                <div style={{ fontSize: '0.75rem', color: '#666', marginBottom: '0.75rem' }}>
+                                  SSDP: <strong>{device.ssdp_server || device.ssdp_st || 'Response'}</strong>
+                                  {device.ssdp_location && (
+                                    <span style={{ marginLeft: '0.5rem' }}>
+                                      {device.ssdp_location}
                                     </span>
                                   )}
+                                  {device.ssdp_scanned_at ? (
+                                    <span style={{ marginLeft: '0.5rem' }}>
+                                      (Scanned: {new Date(device.ssdp_scanned_at).toLocaleString()})
+                                    </span>
+                                  ) : null}
                                 </div>
+                              )}
                                 {portResults.pihole && (
                                   <div style={{
                                     backgroundColor: '#e3f2fd',
@@ -610,6 +926,7 @@ function App() {
                                       <tr style={{ borderBottom: '1px solid #ddd' }}>
                                         <th style={{ padding: '0.25rem', textAlign: 'left', width: '80px' }}>Port</th>
                                         <th style={{ padding: '0.25rem', textAlign: 'left' }}>Service</th>
+                                        <th style={{ padding: '0.25rem', textAlign: 'left' }}>Details</th>
                                         <th style={{ padding: '0.25rem', textAlign: 'left', width: '80px' }}>Status</th>
                                       </tr>
                                     </thead>
@@ -655,6 +972,9 @@ function App() {
                                               ) : (
                                                 port.service
                                               )}
+                                            </td>
+                                            <td style={{ padding: '0.25rem', color: '#666' }}>
+                                              {port.details || '-'}
                                             </td>
                                             <td style={{ padding: '0.25rem' }}>
                                               <span style={{
@@ -724,6 +1044,7 @@ function App() {
                         <tr>
                           <th>IP</th>
                           <th>Hostname</th>
+                          <th>Vendor</th>
                           <th>Total Scans</th>
                           <th>Scans Online</th>
                           <th>Appearance %</th>
@@ -736,6 +1057,7 @@ function App() {
                           <tr key={index}>
                             <td>{device.ip}</td>
                             <td>{device.hostname}</td>
+                            <td>{device.vendor || '-'}</td>
                             <td>{device.total_scans}</td>
                             <td>{device.scans_seen_online}</td>
                             <td>{device.appearance_rate}%</td>
@@ -927,6 +1249,78 @@ function App() {
               />
               <div style={{ fontSize: '0.625rem', color: '#999', marginTop: '0.25rem' }}>
                 Lower = more reliable, slower
+              </div>
+            </div>
+            <div style={{ marginBottom: '0.75rem' }}>
+              <label style={{ fontSize: '0.75rem', color: '#666', display: 'block', marginBottom: '0.25rem' }}>
+                Retries (per port)
+              </label>
+              <input
+                type="number"
+                min="0"
+                max="5"
+                step="1"
+                value={portScanRetries}
+                onChange={(e) => setPortScanRetries(parseInt(e.target.value))}
+                style={{
+                  width: '100%',
+                  padding: '0.25rem',
+                  border: '1px solid #ddd',
+                  fontSize: '0.875rem',
+                  fontFamily: 'inherit'
+                }}
+              />
+              <div style={{ fontSize: '0.625rem', color: '#999', marginTop: '0.25rem' }}>
+                More retries = more reliable, slower
+              </div>
+            </div>
+            <div style={{ marginBottom: '0.75rem' }}>
+              <label style={{ fontSize: '0.75rem', color: '#666', display: 'block', marginBottom: '0.25rem' }}>
+                Service Fingerprinting (nmap)
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.75rem' }}>
+                <input
+                  type="checkbox"
+                  checked={serviceScanEnabled}
+                  onChange={(e) => setServiceScanEnabled(e.target.checked)}
+                />
+                Enrich open ports with service/version info
+              </label>
+            </div>
+            <div style={{ marginBottom: '0.75rem' }}>
+              <label style={{ fontSize: '0.75rem', color: '#666', display: 'block', marginBottom: '0.25rem' }}>
+                Startup Full Scan
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.75rem' }}>
+                <input
+                  type="checkbox"
+                  checked={startupFullScanEnabled}
+                  onChange={(e) => setStartupFullScanEnabled(e.target.checked)}
+                />
+                Run port + OS + SSDP scan on app start
+              </label>
+              <div style={{ marginTop: '0.5rem' }}>
+                <label style={{ fontSize: '0.75rem', color: '#666', display: 'block', marginBottom: '0.25rem' }}>
+                  Time Budget (seconds)
+                </label>
+                <input
+                  type="number"
+                  min="30"
+                  max="300"
+                  step="10"
+                  value={startupFullScanBudgetSec}
+                  onChange={(e) => setStartupFullScanBudgetSec(parseInt(e.target.value))}
+                  style={{
+                    width: '100%',
+                    padding: '0.25rem',
+                    border: '1px solid #ddd',
+                    fontSize: '0.875rem',
+                    fontFamily: 'inherit'
+                  }}
+                />
+                <div style={{ fontSize: '0.625rem', color: '#999', marginTop: '0.25rem' }}>
+                  Target completion time (default 120s)
+                </div>
               </div>
             </div>
           </div>

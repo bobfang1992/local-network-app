@@ -1,5 +1,7 @@
 import socket
 import logging
+import errno
+import time
 from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -50,7 +52,7 @@ DEFAULT_PORTS = [
 ]
 
 
-def scan_port(ip: str, port: int, timeout: float = 2.0, retries: int = 1) -> Dict:
+def scan_port(ip: str, port: int, timeout: float = 2.0, retries: int = 2) -> Dict:
     """
     Scan a single port on the given IP address.
 
@@ -63,31 +65,39 @@ def scan_port(ip: str, port: int, timeout: float = 2.0, retries: int = 1) -> Dic
     Returns:
         Dict with port, status, and service information
     """
+    transient_errors = {errno.ETIMEDOUT, errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EHOSTDOWN}
+    status = "filtered"
+
     for attempt in range(retries + 1):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
 
         try:
             result = sock.connect_ex((ip, port))
-            sock.close()
-
             if result == 0:
                 status = "open"
                 break
-            else:
+            if result == errno.ECONNREFUSED:
                 status = "closed"
                 break
+            if result in transient_errors and attempt < retries:
+                time.sleep(0.05 * (attempt + 1))
+                continue
+            status = "filtered" if result in transient_errors else "error"
+            break
         except socket.timeout:
-            sock.close()
             if attempt < retries:
-                continue  # Retry
+                time.sleep(0.05 * (attempt + 1))
+                continue
             status = "filtered"
         except socket.error as e:
-            sock.close()
             logger.debug(f"Error scanning {ip}:{port} - {e}")
             if attempt < retries:
-                continue  # Retry
+                time.sleep(0.05 * (attempt + 1))
+                continue
             status = "error"
+        finally:
+            sock.close()
 
     service = COMMON_PORTS.get(port, "Unknown Service")
 
@@ -98,15 +108,16 @@ def scan_port(ip: str, port: int, timeout: float = 2.0, retries: int = 1) -> Dic
     }
 
 
-def scan_ports(ip: str, ports: List[int] = None, timeout: float = 2.0, max_workers: int = 20) -> List[Dict]:
+def scan_ports(ip: str, ports: List[int] = None, timeout: float = 2.5, max_workers: int = 15, retries: int = 2) -> List[Dict]:
     """
     Scan multiple ports on a given IP address concurrently.
 
     Args:
         ip: IP address to scan
         ports: List of ports to scan (defaults to common ports)
-        timeout: Socket timeout in seconds (default 2.0 for reliability)
-        max_workers: Maximum number of concurrent threads (default 20 to avoid overwhelming network)
+        timeout: Socket timeout in seconds (default 2.5 for reliability)
+        max_workers: Maximum number of concurrent threads (default 15 to avoid overwhelming network)
+        retries: Number of retries per port (default 2 for Wi-Fi stability)
 
     Returns:
         List of dicts with port scan results (only open ports)
@@ -114,14 +125,17 @@ def scan_ports(ip: str, ports: List[int] = None, timeout: float = 2.0, max_worke
     if ports is None:
         ports = DEFAULT_PORTS
 
-    logger.info(f"Starting port scan on {ip} for {len(ports)} ports (timeout={timeout}s, workers={max_workers})")
+    logger.info(
+        f"Starting port scan on {ip} for {len(ports)} ports "
+        f"(timeout={timeout}s, workers={max_workers}, retries={retries})"
+    )
 
     results = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all port scans with retry enabled
         future_to_port = {
-            executor.submit(scan_port, ip, port, timeout, retries=1): port
+            executor.submit(scan_port, ip, port, timeout, retries=retries): port
             for port in ports
         }
 

@@ -43,6 +43,19 @@ def init_database():
                 ip TEXT UNIQUE NOT NULL,
                 mac TEXT NOT NULL,
                 hostname TEXT,
+                vendor TEXT,
+                os_guess TEXT,
+                os_accuracy INTEGER,
+                os_scanned_at TEXT,
+                os_last_error TEXT,
+                os_last_error_at TEXT,
+                last_port_scan_at TEXT,
+                last_port_scan_count INTEGER DEFAULT 0,
+                ssdp_server TEXT,
+                ssdp_location TEXT,
+                ssdp_st TEXT,
+                ssdp_usn TEXT,
+                ssdp_scanned_at TEXT,
                 notes TEXT DEFAULT '',
                 first_seen TEXT NOT NULL,
                 last_seen TEXT NOT NULL,
@@ -64,6 +77,108 @@ def init_database():
             # Column already exists
             pass
 
+        # Add vendor column to existing databases (migration)
+        try:
+            cursor.execute("ALTER TABLE devices ADD COLUMN vendor TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        # Add OS detection columns to existing databases (migration)
+        try:
+            cursor.execute("ALTER TABLE devices ADD COLUMN os_guess TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE devices ADD COLUMN os_accuracy INTEGER")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE devices ADD COLUMN os_scanned_at TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE devices ADD COLUMN os_last_error TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE devices ADD COLUMN os_last_error_at TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        # Add port scan metadata columns to existing databases (migration)
+        try:
+            cursor.execute("ALTER TABLE devices ADD COLUMN last_port_scan_at TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE devices ADD COLUMN last_port_scan_count INTEGER DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        # Add SSDP metadata columns to existing databases (migration)
+        try:
+            cursor.execute("ALTER TABLE devices ADD COLUMN ssdp_server TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE devices ADD COLUMN ssdp_location TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE devices ADD COLUMN ssdp_st TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE devices ADD COLUMN ssdp_usn TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        try:
+            cursor.execute("ALTER TABLE devices ADD COLUMN ssdp_scanned_at TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+        # Add port scan details column to existing databases (migration)
+        try:
+            cursor.execute("ALTER TABLE port_scans ADD COLUMN details TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
         # Add consecutive_online column for streak tracking (migration)
         try:
             cursor.execute("ALTER TABLE devices ADD COLUMN consecutive_online INTEGER DEFAULT 0")
@@ -121,6 +236,7 @@ def init_database():
                 port INTEGER NOT NULL,
                 status TEXT NOT NULL,
                 service TEXT,
+                details TEXT,
                 scan_time TEXT NOT NULL,
                 UNIQUE(ip, port, scan_time)
             )
@@ -155,7 +271,7 @@ def get_total_scans() -> int:
         return result['count'] if result else 0
 
 
-def update_device(ip: str, mac: str, hostname: str, is_online: bool = True):
+def update_device(ip: str, mac: str, hostname: str, vendor: str = None, is_online: bool = True):
     """
     Update or insert device record.
 
@@ -163,6 +279,7 @@ def update_device(ip: str, mac: str, hostname: str, is_online: bool = True):
         ip: Device IP address
         mac: Device MAC address
         hostname: Device hostname
+        vendor: Manufacturer/vendor name (from MAC OUI lookup)
         is_online: Whether device is currently online
     """
     now = datetime.now().isoformat()
@@ -174,6 +291,8 @@ def update_device(ip: str, mac: str, hostname: str, is_online: bool = True):
         cursor.execute("SELECT * FROM devices WHERE ip = ?", (ip,))
         existing = cursor.fetchone()
 
+        vendor_value = vendor if vendor is not None else (existing['vendor'] if existing else None)
+
         if existing:
             # Update existing device
             if is_online:
@@ -181,6 +300,7 @@ def update_device(ip: str, mac: str, hostname: str, is_online: bool = True):
                     UPDATE devices SET
                         mac = ?,
                         hostname = ?,
+                        vendor = ?,
                         last_seen = ?,
                         last_seen_online = ?,
                         scans_seen_online = scans_seen_online + 1,
@@ -188,27 +308,28 @@ def update_device(ip: str, mac: str, hostname: str, is_online: bool = True):
                         consecutive_online = consecutive_online + 1,
                         updated_at = ?
                     WHERE ip = ?
-                """, (mac, hostname, now, now, now, ip))
+                """, (mac, hostname, vendor_value, now, now, now, ip))
             else:
                 cursor.execute("""
                     UPDATE devices SET
                         last_seen = ?,
+                        vendor = ?,
                         scans_seen_offline = scans_seen_offline + 1,
                         consecutive_offline = consecutive_offline + 1,
                         consecutive_online = 0,
                         updated_at = ?
                     WHERE ip = ?
-                """, (now, now, ip))
+                """, (now, vendor_value, now, ip))
         else:
             # Insert new device
             cursor.execute("""
                 INSERT INTO devices (
-                    ip, mac, hostname, first_seen, last_seen, last_seen_online,
+                    ip, mac, hostname, vendor, first_seen, last_seen, last_seen_online,
                     total_scans, scans_seen_online, scans_seen_offline,
                     consecutive_offline, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 0, ?, ?)
             """, (
-                ip, mac, hostname, now, now, now if is_online else None,
+                ip, mac, hostname, vendor_value, now, now, now if is_online else None,
                 1 if is_online else 0,
                 1 if is_online else 0,
                 now, now
@@ -308,6 +429,22 @@ def log_categorization(scan_id: int, ip: str, hostname: str, total_scans: int,
         ))
 
 
+def log_scan_event(ip: str, hostname: str, event_type: str, message: str, scan_id: int = None):
+    """Log non-categorization scan events into the categorization log"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO categorization_log (
+                scan_id, ip, hostname, total_scans, scans_seen_online,
+                appearance_rate, category, device_status, reason, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            scan_id, ip, hostname, None, None,
+            None, "scan_error", event_type, message,
+            datetime.now().isoformat()
+        ))
+
+
 def get_categorization_log(limit: int = 100) -> List[Dict]:
     """Get recent categorization log entries"""
     with get_db() as conn:
@@ -329,6 +466,50 @@ def update_device_notes(ip: str, notes: str):
             UPDATE devices SET notes = ?, updated_at = ?
             WHERE ip = ?
         """, (notes, now, ip))
+
+
+def update_device_os(ip: str, os_guess: str, os_accuracy: int = None):
+    """Update OS guess for a device"""
+    now = datetime.now().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE devices
+            SET os_guess = ?, os_accuracy = ?, os_scanned_at = ?, os_last_error = NULL, os_last_error_at = NULL, updated_at = ?
+            WHERE ip = ?
+        """, (os_guess, os_accuracy, now, now, ip))
+
+
+def update_device_os_error(ip: str, error_message: str):
+    """Store the last OS scan error for a device"""
+    now = datetime.now().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE devices
+            SET os_last_error = ?, os_last_error_at = ?, updated_at = ?
+            WHERE ip = ?
+        """, (error_message, now, now, ip))
+
+
+def update_device_ssdp(ip: str, ssdp_info: Dict):
+    """Store SSDP discovery info for a device"""
+    now = datetime.now().isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE devices
+            SET ssdp_server = ?, ssdp_location = ?, ssdp_st = ?, ssdp_usn = ?, ssdp_scanned_at = ?, updated_at = ?
+            WHERE ip = ?
+        """, (
+            ssdp_info.get('server'),
+            ssdp_info.get('location'),
+            ssdp_info.get('st'),
+            ssdp_info.get('usn'),
+            now,
+            now,
+            ip
+        ))
 
 
 def get_database_stats() -> Dict:
@@ -362,9 +543,15 @@ def save_port_scan_results(ip: str, results: List[Dict], pihole_info: Dict = Non
         cursor = conn.cursor()
         for result in results:
             cursor.execute("""
-                INSERT OR REPLACE INTO port_scans (ip, port, status, service, scan_time)
-                VALUES (?, ?, ?, ?, ?)
-            """, (ip, result['port'], result['status'], result.get('service', ''), now))
+                INSERT OR REPLACE INTO port_scans (ip, port, status, service, details, scan_time)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (ip, result['port'], result['status'], result.get('service', ''), result.get('details', ''), now))
+
+        cursor.execute("""
+            UPDATE devices
+            SET last_port_scan_at = ?, last_port_scan_count = ?, updated_at = ?
+            WHERE ip = ?
+        """, (now, len(results), now, ip))
 
         # Save Pi-hole info if detected
         if pihole_info:
@@ -404,7 +591,7 @@ def get_latest_port_scan(ip: str) -> Optional[Dict]:
 
         # Get all ports from that scan
         cursor.execute("""
-            SELECT port, status, service
+            SELECT port, status, service, details
             FROM port_scans
             WHERE ip = ? AND scan_time = ?
             ORDER BY port
