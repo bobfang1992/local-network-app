@@ -136,6 +136,11 @@
   font-size: 0.875rem;
   font-weight: 400;
   border-bottom: 1px solid #000;
+  user-select: none;
+}
+
+.table th:hover {
+  background-color: #f5f5f5;
 }
 
 .table tbody tr {
@@ -231,7 +236,7 @@
   color: #d00;
 }
 
-/* Device status badges and row colors */
+/* Device category badges - Simplified! */
 .badge {
   display: inline-block;
   padding: 0.125rem 0.375rem;
@@ -242,57 +247,65 @@
   border: 1px solid;
 }
 
+/* NEW: Truly new device (≤3 scans) */
 .badge-new {
   background-color: #e8f5e9;
   color: #2e7d32;
   border-color: #4caf50;
 }
 
-.badge-offline {
-  background-color: #fce4ec;
-  color: #c62828;
-  border-color: #e57373;
-}
-
+/* REGULAR: Appears >70% of the time */
 .badge-regular {
   background-color: #e3f2fd;
   color: #1565c0;
   border-color: #42a5f5;
 }
 
-.badge-rare {
-  background-color: #fff8e1;
-  color: #f57c00;
+/* OCCASIONAL: Appears 30-70% of the time */
+.badge-occasional {
+  background-color: #fff9e6;
+  color: #e65100;
   border-color: #ffb74d;
 }
 
-/* Subtle row colors based on device_category (historical frequency) */
-/* Only apply when device is not NEW or OFFLINE */
+/* RARE: Appears <30% of the time */
+.badge-rare {
+  background-color: #fff3e0;
+  color: #e65100;
+  border-color: #ff9800;
+}
+
+/* OFFLINE: Not responding */
+.badge-offline {
+  background-color: #fafafa;
+  color: #999;
+  border-color: #ccc;
+}
+
+/* Row background colors by category */
+.device-row.category-new {
+  background-color: #f1f8f1;
+}
+
 .device-row.category-regular {
   background-color: #f5f9ff;
 }
 
-.device-row.category-rare {
+.device-row.category-occasional {
   background-color: #fffdf5;
 }
 
-/* Row colors based on device_status (NEW or OFFLINE) - these take priority */
-.device-row.new {
-  background-color: #f1f8f1 !important;
+.device-row.category-rare {
+  background-color: #fff8f0;
 }
 
-.device-row.offline {
-  background-color: #fafafa !important;
+.device-row.category-offline {
+  background-color: #fafafa;
   color: #999;
 }
 
-.device-row.offline td {
+.device-row.category-offline td {
   color: #999;
-}
-
-/* Offline devices that are usually regular - subtle blue-gray tint */
-.device-row.offline.category-regular {
-  background-color: #f0f4f8 !important;
 }
 
 .hostname-cell {

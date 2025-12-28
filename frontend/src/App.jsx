@@ -13,7 +13,15 @@ function App() {
   const [scanLog, setScanLog] = useState([])
   const [activeTab, setActiveTab] = useState('devices')
   const [dbStats, setDbStats] = useState(null)
+  const [catLog, setCatLog] = useState(null)
   const [editingNotes, setEditingNotes] = useState(null) // IP of device being edited
+  const [sortColumn, setSortColumn] = useState('ip')
+  const [sortDirection, setSortDirection] = useState('asc')
+  const [expandedDevice, setExpandedDevice] = useState(null) // IP of expanded device
+  const [portScanResults, setPortScanResults] = useState({}) // Map of IP -> port scan results
+  const [scanningPorts, setScanningPorts] = useState({}) // Map of IP -> scanning status
+  const [portScanTimeout, setPortScanTimeout] = useState(2.0)
+  const [portScanWorkers, setPortScanWorkers] = useState(20)
   const wsRef = useRef(null)
   const reconnectTimeoutRef = useRef(null)
   const countdownIntervalRef = useRef(null)
@@ -103,6 +111,16 @@ function App() {
     }
   }
 
+  const fetchCatLog = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/categorization/log?limit=50')
+      const data = await response.json()
+      setCatLog(data)
+    } catch (err) {
+      console.error('Failed to fetch categorization log:', err)
+    }
+  }
+
   const updateNotes = async (ip, notes) => {
     try {
       const response = await fetch(`http://localhost:8000/api/devices/${ip}/notes`, {
@@ -125,12 +143,110 @@ function App() {
     }
   }
 
-  const handleNotesKeyPress = (e, ip, notes) => {
+  const handleNotesKeyPress = (e, ip) => {
     if (e.key === 'Enter') {
-      updateNotes(ip, notes)
+      // Get the current value from the input field
+      updateNotes(ip, e.target.value)
     } else if (e.key === 'Escape') {
       setEditingNotes(null)
     }
+  }
+
+  const scanPorts = async (ip) => {
+    try {
+      // Set scanning state
+      setScanningPorts(prev => ({ ...prev, [ip]: true }))
+
+      const response = await fetch(`http://localhost:8000/api/devices/${ip}/scan-ports?timeout=${portScanTimeout}&max_workers=${portScanWorkers}`, {
+        method: 'POST'
+      })
+      const data = await response.json()
+
+      if (data.success) {
+        // Store results
+        setPortScanResults(prev => ({
+          ...prev,
+          [ip]: {
+            ports: data.ports,
+            scan_time: new Date().toISOString(),
+            pihole: data.pihole || null
+          }
+        }))
+        // Expand the device to show results
+        setExpandedDevice(ip)
+      }
+    } catch (err) {
+      console.error('Failed to scan ports:', err)
+    } finally {
+      setScanningPorts(prev => ({ ...prev, [ip]: false }))
+    }
+  }
+
+  const scanAllDevices = async () => {
+    const onlineDevices = devices.filter(d => d.status === 'online')
+
+    if (onlineDevices.length === 0) {
+      alert('No online devices to scan')
+      return
+    }
+
+    if (!confirm(`Scan ports on ${onlineDevices.length} online devices? This may take a few minutes.`)) {
+      return
+    }
+
+    // Scan devices sequentially to avoid overwhelming the network
+    for (const device of onlineDevices) {
+      await scanPorts(device.ip)
+      // Small delay between devices
+      await new Promise(resolve => setTimeout(resolve, 500))
+    }
+  }
+
+  const toggleExpandDevice = (ip) => {
+    if (expandedDevice === ip) {
+      setExpandedDevice(null)
+    } else {
+      setExpandedDevice(ip)
+    }
+  }
+
+  const handleSort = (column) => {
+    if (sortColumn === column) {
+      // Toggle direction if same column
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc')
+    } else {
+      // New column, default to ascending
+      setSortColumn(column)
+      setSortDirection('asc')
+    }
+  }
+
+  const getSortedDevices = () => {
+    const sorted = [...devices].sort((a, b) => {
+      let aVal = a[sortColumn]
+      let bVal = b[sortColumn]
+
+      // Handle special cases
+      if (sortColumn === 'ip') {
+        // Sort IP addresses numerically
+        const aNum = aVal.split('.').map(num => parseInt(num).toString().padStart(3, '0')).join('.')
+        const bNum = bVal.split('.').map(num => parseInt(num).toString().padStart(3, '0')).join('.')
+        aVal = aNum
+        bVal = bNum
+      }
+
+      // String comparison
+      if (typeof aVal === 'string') {
+        aVal = aVal.toLowerCase()
+        bVal = (bVal || '').toLowerCase()
+      }
+
+      if (aVal < bVal) return sortDirection === 'asc' ? -1 : 1
+      if (aVal > bVal) return sortDirection === 'asc' ? 1 : -1
+      return 0
+    })
+
+    return sorted
   }
 
   const generateCSV = () => {
@@ -226,7 +342,11 @@ function App() {
   useEffect(() => {
     if (activeTab === 'debug') {
       fetchDbStats()
-      const interval = setInterval(fetchDbStats, 5000) // Refresh every 5 seconds
+      fetchCatLog()
+      const interval = setInterval(() => {
+        fetchDbStats()
+        fetchCatLog()
+      }, 5000) // Refresh every 5 seconds
       return () => clearInterval(interval)
     }
   }, [activeTab])
@@ -274,75 +394,290 @@ function App() {
                 <table className="table">
                   <thead>
                     <tr>
-                      <th>Hostname</th>
-                      <th>IP Address</th>
-                      <th>MAC Address</th>
-                      <th>Status</th>
-                      <th>Notes</th>
+                      <th onClick={() => handleSort('hostname')} style={{ cursor: 'pointer' }}>
+                        Hostname {sortColumn === 'hostname' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th onClick={() => handleSort('ip')} style={{ cursor: 'pointer' }}>
+                        IP Address {sortColumn === 'ip' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th onClick={() => handleSort('mac')} style={{ cursor: 'pointer' }}>
+                        MAC Address {sortColumn === 'mac' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th onClick={() => handleSort('status')} style={{ cursor: 'pointer' }}>
+                        Status {sortColumn === 'status' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th onClick={() => handleSort('notes')} style={{ cursor: 'pointer' }}>
+                        Notes {sortColumn === 'notes' && (sortDirection === 'asc' ? '↑' : '↓')}
+                      </th>
+                      <th style={{ width: '120px' }}>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {devices.map((device, index) => {
-                      const rowClasses = [
-                        'device-row',
-                        device.device_status || '',
-                        device.device_category ? `category-${device.device_category}` : ''
-                      ].filter(Boolean).join(' ')
+                    {getSortedDevices().map((device) => {
+                      const category = device.category || 'unknown'
+                      const rowClasses = ['device-row', `category-${category}`].filter(Boolean).join(' ')
+
+                      const portResults = portScanResults[device.ip]
+                      const isScanning = scanningPorts[device.ip]
+                      const isExpanded = expandedDevice === device.ip
 
                       return (
-                        <tr key={index} className={rowClasses}>
-                          <td className="hostname-cell">
-                            {device.device_status === 'new' && <span className="badge badge-new">NEW</span>}
-                            {device.device_status === 'offline' && <span className="badge badge-offline">OFFLINE</span>}
-                            {device.device_status !== 'new' && device.device_status !== 'offline' && device.device_category === 'regular' && (
-                              <span className="badge badge-regular">REGULAR</span>
-                            )}
-                            {device.device_status !== 'new' && device.device_status !== 'offline' && device.device_category === 'rare' && (
-                              <span className="badge badge-rare">RARE</span>
-                            )}
-                            {device.hostname}
-                          </td>
-                          <td>{device.ip}</td>
-                          <td>{device.mac}</td>
-                          <td>{device.status}</td>
-                          <td>
-                            {editingNotes === device.ip ? (
-                              <input
-                                type="text"
-                                value={device.notes || ''}
-                                onChange={(e) => {
-                                  // Update local state immediately for responsiveness
-                                  const newDevices = [...devices]
-                                  newDevices[index].notes = e.target.value
-                                  setDevices(newDevices)
-                                }}
-                                onKeyDown={(e) => handleNotesKeyPress(e, device.ip, device.notes)}
-                                onBlur={() => setEditingNotes(null)}
-                                autoFocus
-                                placeholder="Type note and press Enter..."
+                        <>
+                          <tr key={device.ip} className={rowClasses}>
+                            <td className="hostname-cell">
+                              {category === 'new' && <span className="badge badge-new">NEW</span>}
+                              {category === 'offline' && <span className="badge badge-offline">OFFLINE</span>}
+                              {category === 'regular' && <span className="badge badge-regular">REGULAR</span>}
+                              {category === 'occasional' && <span className="badge badge-occasional">OCCASIONAL</span>}
+                              {category === 'rare' && <span className="badge badge-rare">RARE</span>}
+                              {portResults?.pihole && (
+                                <span className="badge" style={{
+                                  backgroundColor: '#1976d2',
+                                  color: '#fff',
+                                  borderColor: '#1976d2'
+                                }}>
+                                  🛡️ PI-HOLE
+                                </span>
+                              )}
+                              {device.hostname}
+                            </td>
+                            <td>{device.ip}</td>
+                            <td>{device.mac}</td>
+                            <td>{device.status}</td>
+                            <td>
+                              {editingNotes === device.ip ? (
+                                <input
+                                  type="text"
+                                  value={device.notes || ''}
+                                  onChange={(e) => {
+                                    // Find and update device by IP (not index) to work with sorted tables
+                                    const newDevices = devices.map(d =>
+                                      d.ip === device.ip ? { ...d, notes: e.target.value } : d
+                                    )
+                                    setDevices(newDevices)
+                                  }}
+                                  onKeyDown={(e) => handleNotesKeyPress(e, device.ip)}
+                                  onBlur={() => setEditingNotes(null)}
+                                  autoFocus
+                                  placeholder="Type note and press Enter..."
+                                  style={{
+                                    width: '100%',
+                                    border: '1px solid #000',
+                                    padding: '0.25rem',
+                                    fontFamily: 'inherit',
+                                    fontSize: '0.875rem'
+                                  }}
+                                />
+                              ) : (
+                                <div
+                                  onClick={() => setEditingNotes(device.ip)}
+                                  style={{
+                                    cursor: 'pointer',
+                                    padding: '0.25rem',
+                                    minHeight: '1.5rem',
+                                    color: device.notes ? '#000' : '#999'
+                                  }}
+                                >
+                                  {device.notes || 'Click to add notes...'}
+                                </div>
+                              )}
+                            </td>
+                            <td>
+                              <button
+                                onClick={() => scanPorts(device.ip)}
+                                disabled={isScanning || device.status === 'offline'}
+                                className="btn-classic"
                                 style={{
-                                  width: '100%',
-                                  border: '1px solid #000',
-                                  padding: '0.25rem',
-                                  fontFamily: 'inherit',
-                                  fontSize: '0.875rem'
-                                }}
-                              />
-                            ) : (
-                              <div
-                                onClick={() => setEditingNotes(device.ip)}
-                                style={{
-                                  cursor: 'pointer',
-                                  padding: '0.25rem',
-                                  minHeight: '1.5rem',
-                                  color: device.notes ? '#000' : '#999'
+                                  fontSize: '0.75rem',
+                                  padding: '0.25rem 0.5rem',
+                                  marginRight: '0.25rem',
+                                  marginBottom: '0.25rem'
                                 }}
                               >
-                                {device.notes || 'Click to add notes...'}
-                              </div>
-                            )}
-                          </td>
-                        </tr>
+                                {isScanning ? 'Scanning...' : 'Scan Ports'}
+                              </button>
+                              {portResults && (
+                                <button
+                                  onClick={() => toggleExpandDevice(device.ip)}
+                                  className="btn-classic"
+                                  style={{
+                                    fontSize: '0.75rem',
+                                    padding: '0.25rem 0.5rem',
+                                    backgroundColor: isExpanded ? '#666' : '#000',
+                                    marginRight: '0.25rem',
+                                    marginBottom: '0.25rem'
+                                  }}
+                                >
+                                  {isExpanded ? '▼' : '▶'} {portResults.ports.length}
+                                </button>
+                              )}
+                              {portResults?.pihole && (
+                                <a
+                                  href={portResults.pihole.admin_url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="btn-classic"
+                                  style={{
+                                    fontSize: '0.75rem',
+                                    padding: '0.25rem 0.5rem',
+                                    backgroundColor: '#1976d2',
+                                    textDecoration: 'none',
+                                    display: 'inline-block'
+                                  }}
+                                >
+                                  Pi-hole Admin →
+                                </a>
+                              )}
+                            </td>
+                          </tr>
+                          {isExpanded && portResults && (
+                            <tr key={`${device.ip}-ports`}>
+                              <td colSpan="6" style={{ padding: '1rem', backgroundColor: '#fafafa' }}>
+                                <div style={{ fontSize: '0.875rem', marginBottom: '0.5rem', fontWeight: 500 }}>
+                                  Open Ports on {device.ip}
+                                  <span style={{ color: '#666', fontWeight: 400, marginLeft: '0.5rem' }}>
+                                    (Scanned: {new Date(portResults.scan_time).toLocaleString()})
+                                  </span>
+                                  {portResults.ports.some(p => p.port === 53) && !portResults.pihole && (
+                                    <span style={{
+                                      marginLeft: '0.5rem',
+                                      padding: '0.25rem 0.5rem',
+                                      backgroundColor: '#e3f2fd',
+                                      color: '#1565c0',
+                                      fontSize: '0.75rem',
+                                      fontWeight: 500,
+                                      borderRadius: '3px'
+                                    }}>
+                                      🔍 DNS Server
+                                    </span>
+                                  )}
+                                  {portResults.pihole && (
+                                    <span style={{
+                                      marginLeft: '0.5rem',
+                                      padding: '0.25rem 0.5rem',
+                                      backgroundColor: '#1976d2',
+                                      color: '#fff',
+                                      fontSize: '0.75rem',
+                                      fontWeight: 500,
+                                      borderRadius: '3px'
+                                    }}>
+                                      🛡️ Pi-hole Detected!
+                                    </span>
+                                  )}
+                                </div>
+                                {portResults.pihole && (
+                                  <div style={{
+                                    backgroundColor: '#e3f2fd',
+                                    padding: '0.75rem',
+                                    marginBottom: '0.75rem',
+                                    borderLeft: '3px solid #1976d2',
+                                    fontSize: '0.75rem'
+                                  }}>
+                                    <div style={{ fontWeight: 500, marginBottom: '0.5rem' }}>
+                                      Pi-hole Information:
+                                    </div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                                      {portResults.pihole.domains_blocked > 0 && (
+                                        <div>Domains Blocked: <strong>{portResults.pihole.domains_blocked.toLocaleString()}</strong></div>
+                                      )}
+                                      {portResults.pihole.queries_today > 0 && (
+                                        <div>Queries Today: <strong>{portResults.pihole.queries_today.toLocaleString()}</strong></div>
+                                      )}
+                                      {portResults.pihole.ads_blocked_today > 0 && (
+                                        <div>Ads Blocked Today: <strong>{portResults.pihole.ads_blocked_today.toLocaleString()}</strong></div>
+                                      )}
+                                      {portResults.pihole.status && (
+                                        <div>Status: <strong style={{ color: portResults.pihole.status === 'enabled' ? '#2e7d32' : '#666' }}>
+                                          {portResults.pihole.status}
+                                        </strong></div>
+                                      )}
+                                    </div>
+                                    <div style={{ marginTop: '0.5rem' }}>
+                                      <a
+                                        href={portResults.pihole.admin_url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        style={{ color: '#1976d2', fontWeight: 500, textDecoration: 'underline' }}
+                                      >
+                                        Open Pi-hole Admin →
+                                      </a>
+                                    </div>
+                                  </div>
+                                )}
+                                {portResults.ports.length > 0 ? (
+                                  <table style={{ width: '100%', fontSize: '0.75rem' }}>
+                                    <thead>
+                                      <tr style={{ borderBottom: '1px solid #ddd' }}>
+                                        <th style={{ padding: '0.25rem', textAlign: 'left', width: '80px' }}>Port</th>
+                                        <th style={{ padding: '0.25rem', textAlign: 'left' }}>Service</th>
+                                        <th style={{ padding: '0.25rem', textAlign: 'left', width: '80px' }}>Status</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {portResults.ports.map((port) => {
+                                        const isWebPort = port.port === 80 || port.port === 443
+                                        const protocol = port.port === 443 ? 'https' : 'http'
+                                        const url = `${protocol}://${device.ip}${port.port === 80 || port.port === 443 ? '' : `:${port.port}`}`
+
+                                        return (
+                                          <tr key={port.port} style={{ borderBottom: '1px solid #eee' }}>
+                                            <td style={{ padding: '0.25rem', fontFamily: 'monospace' }}>
+                                              {isWebPort ? (
+                                                <a
+                                                  href={url}
+                                                  target="_blank"
+                                                  rel="noopener noreferrer"
+                                                  style={{
+                                                    color: '#1565c0',
+                                                    textDecoration: 'underline',
+                                                    cursor: 'pointer'
+                                                  }}
+                                                >
+                                                  {port.port} →
+                                                </a>
+                                              ) : (
+                                                port.port
+                                              )}
+                                            </td>
+                                            <td style={{ padding: '0.25rem' }}>
+                                              {isWebPort ? (
+                                                <a
+                                                  href={url}
+                                                  target="_blank"
+                                                  rel="noopener noreferrer"
+                                                  style={{
+                                                    color: '#1565c0',
+                                                    textDecoration: 'none'
+                                                  }}
+                                                >
+                                                  {port.service}
+                                                </a>
+                                              ) : (
+                                                port.service
+                                              )}
+                                            </td>
+                                            <td style={{ padding: '0.25rem' }}>
+                                              <span style={{
+                                                color: port.status === 'open' ? '#2e7d32' : '#999',
+                                                fontWeight: 500
+                                              }}>
+                                                {port.status}
+                                              </span>
+                                            </td>
+                                          </tr>
+                                        )
+                                      })}
+                                    </tbody>
+                                  </table>
+                                ) : (
+                                  <div style={{ color: '#666', padding: '1rem' }}>
+                                    No open ports found
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          )}
+                        </>
                       )
                     })}
                   </tbody>
@@ -411,6 +746,47 @@ function App() {
                       </tbody>
                     </table>
                   </div>
+
+                  <div className="debug-section">
+                    <h3>Categorization Log (Last 50 Entries)</h3>
+                    <p style={{ fontSize: '0.75rem', color: '#666', marginBottom: '1rem' }}>
+                      Shows how each device was categorized at each scan. This helps debug why devices are showing certain colors.
+                    </p>
+                    {catLog && catLog.log ? (
+                      <table className="debug-table">
+                        <thead>
+                          <tr>
+                            <th>Timestamp</th>
+                            <th>IP</th>
+                            <th>Hostname</th>
+                            <th>Category</th>
+                            <th>Status</th>
+                            <th>Total Scans</th>
+                            <th>Online</th>
+                            <th>Rate</th>
+                            <th>Reason</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {catLog.log.slice(0, 50).map((entry, index) => (
+                            <tr key={index}>
+                              <td>{new Date(entry.timestamp).toLocaleTimeString()}</td>
+                              <td>{entry.ip}</td>
+                              <td>{entry.hostname}</td>
+                              <td>{entry.category}</td>
+                              <td>{entry.device_status}</td>
+                              <td>{entry.total_scans}</td>
+                              <td>{entry.scans_seen_online}</td>
+                              <td>{(entry.appearance_rate * 100).toFixed(1)}%</td>
+                              <td style={{ fontSize: '0.65rem' }}>{entry.reason}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <div>Loading categorization log...</div>
+                    )}
+                  </div>
                 </>
               ) : (
                 <div className="loading">Loading database stats...</div>
@@ -454,6 +830,20 @@ function App() {
             </button>
           </div>
 
+          <div className="status-section">
+            <button
+              onClick={scanAllDevices}
+              disabled={!connected || devices.filter(d => d.status === 'online').length === 0}
+              className="btn-classic w-full"
+              style={{ backgroundColor: '#1565c0' }}
+            >
+              Scan All Ports →
+            </button>
+            <div style={{ fontSize: '0.625rem', color: '#666', marginTop: '0.5rem' }}>
+              Scans ports on all online devices to find services like Pi-hole (DNS on port 53)
+            </div>
+          </div>
+
           {connected && (
             <div className="status-section">
               <div className="status-label">Next Scan</div>
@@ -492,27 +882,77 @@ function App() {
           )}
 
           <div className="status-section">
+            <div className="status-label">Port Scan Settings</div>
+            <div style={{ marginBottom: '0.75rem' }}>
+              <label style={{ fontSize: '0.75rem', color: '#666', display: 'block', marginBottom: '0.25rem' }}>
+                Timeout (seconds)
+              </label>
+              <input
+                type="number"
+                min="0.5"
+                max="10"
+                step="0.5"
+                value={portScanTimeout}
+                onChange={(e) => setPortScanTimeout(parseFloat(e.target.value))}
+                style={{
+                  width: '100%',
+                  padding: '0.25rem',
+                  border: '1px solid #ddd',
+                  fontSize: '0.875rem',
+                  fontFamily: 'inherit'
+                }}
+              />
+              <div style={{ fontSize: '0.625rem', color: '#999', marginTop: '0.25rem' }}>
+                Higher = more reliable, slower
+              </div>
+            </div>
+            <div style={{ marginBottom: '0.75rem' }}>
+              <label style={{ fontSize: '0.75rem', color: '#666', display: 'block', marginBottom: '0.25rem' }}>
+                Concurrent Workers
+              </label>
+              <input
+                type="number"
+                min="5"
+                max="100"
+                step="5"
+                value={portScanWorkers}
+                onChange={(e) => setPortScanWorkers(parseInt(e.target.value))}
+                style={{
+                  width: '100%',
+                  padding: '0.25rem',
+                  border: '1px solid #ddd',
+                  fontSize: '0.875rem',
+                  fontFamily: 'inherit'
+                }}
+              />
+              <div style={{ fontSize: '0.625rem', color: '#999', marginTop: '0.25rem' }}>
+                Lower = more reliable, slower
+              </div>
+            </div>
+          </div>
+
+          <div className="status-section">
             <div className="status-label">Color Legend</div>
             <div className="color-legend">
               <div className="legend-item">
                 <div className="legend-color" style={{ backgroundColor: '#e8f5e9', borderColor: '#4caf50' }}></div>
-                <div className="legend-label">NEW - First time seen</div>
+                <div className="legend-label">NEW - First 3 scans</div>
               </div>
               <div className="legend-item">
                 <div className="legend-color" style={{ backgroundColor: '#e3f2fd', borderColor: '#42a5f5' }}></div>
-                <div className="legend-label">REGULAR - Seen in &gt;70% of scans</div>
+                <div className="legend-label">REGULAR - Appears &gt;70%</div>
               </div>
               <div className="legend-item">
-                <div className="legend-color" style={{ backgroundColor: '#fff8e1', borderColor: '#ffb74d' }}></div>
-                <div className="legend-label">RARE - Seen in &lt;30% of scans</div>
+                <div className="legend-color" style={{ backgroundColor: '#fff9e6', borderColor: '#ffb74d' }}></div>
+                <div className="legend-label">OCCASIONAL - Appears 30-70%</div>
               </div>
               <div className="legend-item">
-                <div className="legend-color" style={{ backgroundColor: '#fafafa', borderColor: '#e0e0e0' }}></div>
+                <div className="legend-color" style={{ backgroundColor: '#fff3e0', borderColor: '#ff9800' }}></div>
+                <div className="legend-label">RARE - Appears &lt;30%</div>
+              </div>
+              <div className="legend-item">
+                <div className="legend-color" style={{ backgroundColor: '#fafafa', borderColor: '#ccc' }}></div>
                 <div className="legend-label">OFFLINE - Not responding</div>
-              </div>
-              <div className="legend-item">
-                <div className="legend-color" style={{ backgroundColor: '#f0f4f8', borderColor: '#e0e0e0' }}></div>
-                <div className="legend-label">Regular device offline</div>
               </div>
             </div>
           </div>

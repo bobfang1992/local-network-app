@@ -1,10 +1,14 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from network_scanner import scan_network
+from port_scanner import scan_ports
+from pi_hole_detector import check_if_pihole
 from database import (
     init_database, update_device, increment_total_scans,
     get_device_history, get_all_known_devices, calculate_device_category,
-    record_scan, get_database_stats, get_total_scans, update_device_notes
+    record_scan, get_database_stats, get_total_scans, update_device_notes,
+    log_categorization, get_categorization_log, save_port_scan_results,
+    get_latest_port_scan
 )
 import uvicorn
 import logging
@@ -63,20 +67,17 @@ class ScannerState:
 
 state = ScannerState()
 
-def compare_devices(current_devices, previous_devices, grace_scans=3):
+def compare_devices(current_devices, previous_devices, scan_id: int, grace_scans=3):
     """
     Compare current scan with previous scan to detect changes.
     Uses database to track device history and categorize devices.
 
-    Device categories based on history:
-    - new: First time seeing this device (< 5 scans)
-    - regular: Seen in >70% of scans (frequent device)
+    Simplified categories:
+    - new: Truly new device (≤3 scans)
+    - regular: Seen in >70% of scans
     - occasional: Seen in 30-70% of scans
     - rare: Seen in <30% of scans
-
-    Device status:
-    - online: Currently responding to scans
-    - offline: Not responding (after grace period)
+    - offline: Currently not responding (after grace period)
 
     Grace period: Devices aren't marked offline until they miss grace_scans consecutive scans.
     """
@@ -102,18 +103,17 @@ def compare_devices(current_devices, previous_devices, grace_scans=3):
         # Get device history
         history = get_device_history(ip)
 
-        # Calculate category
-        category = calculate_device_category(history) if history else 'new'
-
-        # Determine device_status (for UI badge/highlighting)
-        if ip not in prev_ips:
-            device_status = 'new'  # Just appeared
+        # Calculate category with reason (online device)
+        # Pass consecutive_online for streak-based upgrades
+        if history:
+            recent_streak = history.get('consecutive_online', 0)
+            category, reason = calculate_device_category(history, is_online=True, recent_streak=recent_streak)
         else:
-            device_status = 'existing'
+            category, reason = 'new', 'no history yet'
 
         # Add enriched data
-        device['device_status'] = device_status
-        device['device_category'] = category
+        device['category'] = category
+        device['status'] = 'online'
         device['last_seen'] = now.isoformat()
         device['missed_scans'] = 0
 
@@ -129,6 +129,21 @@ def compare_devices(current_devices, previous_devices, grace_scans=3):
             device['scans_seen_online'] = 1
             device['appearance_rate'] = 1.0
             device['notes'] = ''
+
+        # Log categorization decision
+        log_categorization(
+            scan_id=scan_id,
+            ip=ip,
+            hostname=hostname,
+            total_scans=device['total_scans'],
+            scans_seen_online=device['scans_seen_online'],
+            appearance_rate=device['appearance_rate'],
+            category=category,
+            device_status='online',
+            reason=reason
+        )
+
+        logger.info(f"[CATEGORIZATION] {ip} ({hostname}): {category} | total={device['total_scans']} online={device['scans_seen_online']} rate={device['appearance_rate']:.2%} | reason: {reason}")
 
         result.append(device)
 
@@ -152,24 +167,37 @@ def compare_devices(current_devices, previous_devices, grace_scans=3):
             # Only show offline devices after grace period
             if missed_scans >= grace_scans:
                 offline_device = prev_device.copy()
-                offline_device['device_status'] = 'offline'
                 offline_device['status'] = 'offline'
                 offline_device['missed_scans'] = missed_scans
 
-                # Calculate category based on history
+                # Calculate category for offline device
                 if history:
-                    category = calculate_device_category(history)
-                    offline_device['device_category'] = category
+                    category, reason = calculate_device_category(history, is_online=False)
+                    offline_device['category'] = category
                     offline_device['total_scans'] = history['total_scans']
                     offline_device['scans_seen_online'] = history['scans_seen_online']
                     offline_device['appearance_rate'] = history['scans_seen_online'] / history['total_scans'] if history['total_scans'] > 0 else 0
                     offline_device['notes'] = history.get('notes', '')
 
+                    # Log categorization for offline device
+                    log_categorization(
+                        scan_id=scan_id,
+                        ip=ip,
+                        hostname=prev_device.get('hostname', 'Unknown'),
+                        total_scans=offline_device['total_scans'],
+                        scans_seen_online=offline_device['scans_seen_online'],
+                        appearance_rate=offline_device['appearance_rate'],
+                        category=category,
+                        device_status='offline',
+                        reason=f"OFFLINE (missed {missed_scans} scans) | {reason}"
+                    )
+
+                    logger.info(f"[CATEGORIZATION] {ip} ({prev_device.get('hostname', 'Unknown')}): {category} | total={offline_device['total_scans']} online={offline_device['scans_seen_online']} rate={offline_device['appearance_rate']:.2%} | reason: {reason}")
+
                 result.append(offline_device)
             else:
-                # Keep device as "existing" but increment missed counter
+                # Keep device in list but increment missed counter
                 prev_device['missed_scans'] = missed_scans
-                prev_device['device_status'] = 'existing'
                 result.append(prev_device)
 
     return result
@@ -196,11 +224,11 @@ async def continuous_scanner(interval: int = 30):
             loop = asyncio.get_event_loop()
             devices = await loop.run_in_executor(None, scan_network)
 
-            # Record scan in database
-            record_scan(len(devices), scan_method="scapy")
+            # Record scan in database and get scan_id
+            scan_id = record_scan(len(devices), scan_method="scapy")
 
             # Compare with previous scan to detect changes
-            devices_with_status = compare_devices(devices, state.previous_devices)
+            devices_with_status = compare_devices(devices, state.previous_devices, scan_id=scan_id)
 
             # Count changes
             new_count = sum(1 for d in devices_with_status if d.get('device_status') == 'new')
@@ -308,12 +336,26 @@ async def get_db_stats():
                 "total_scans": d['total_scans'],
                 "scans_seen_online": d['scans_seen_online'],
                 "appearance_rate": round(d['scans_seen_online'] / d['total_scans'] * 100, 1) if d['total_scans'] > 0 else 0,
-                "category": calculate_device_category(d),
+                "category": calculate_device_category(d)[0],  # Get category from tuple
                 "notes": d.get('notes', '')
             }
             for d in known_devices
         ]
     }
+
+@app.get("/api/categorization/log")
+async def get_cat_log(limit: int = 100):
+    """Get categorization log for debugging"""
+    try:
+        log_entries = get_categorization_log(limit=limit)
+        return {
+            "success": True,
+            "log": log_entries,
+            "count": len(log_entries)
+        }
+    except Exception as e:
+        logger.error(f"Error fetching categorization log: {e}")
+        return {"success": False, "message": str(e)}
 
 @app.post("/api/devices/{ip}/notes")
 async def update_notes(ip: str, notes: dict):
@@ -323,6 +365,76 @@ async def update_notes(ip: str, notes: dict):
         return {"success": True, "message": "Notes updated"}
     except Exception as e:
         logger.error(f"Error updating notes: {e}")
+        return {"success": False, "message": str(e)}
+
+@app.post("/api/devices/{ip}/scan-ports")
+async def scan_device_ports(ip: str, timeout: float = 2.0, max_workers: int = 20):
+    """Scan ports on a specific device"""
+    try:
+        logger.info(f"Starting port scan for {ip} (timeout={timeout}s, workers={max_workers})")
+
+        # Run port scan in thread pool to not block event loop
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(
+            None,
+            lambda: scan_ports(ip, timeout=timeout, max_workers=max_workers)
+        )
+
+        logger.info(f"Port scan complete for {ip}: {len(results)} open ports")
+
+        # Check if this device is running Pi-hole
+        pihole_info = None
+        if results:
+            open_port_numbers = [r['port'] for r in results]
+            pihole_info = await loop.run_in_executor(
+                None,
+                lambda: check_if_pihole(ip, open_port_numbers)
+            )
+
+            if pihole_info:
+                logger.info(f"✓ Pi-hole detected on {ip}: {pihole_info['admin_url']}")
+
+        # Save results to database (including Pi-hole info)
+        if results:
+            save_port_scan_results(ip, results, pihole_info)
+
+        return {
+            "success": True,
+            "ip": ip,
+            "open_ports": len(results),
+            "ports": results,
+            "pihole": pihole_info,
+            "config": {
+                "timeout": timeout,
+                "max_workers": max_workers
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error scanning ports for {ip}: {e}")
+        return {"success": False, "message": str(e)}
+
+@app.get("/api/devices/{ip}/ports")
+async def get_device_ports(ip: str):
+    """Get latest port scan results for a device"""
+    try:
+        scan_data = get_latest_port_scan(ip)
+
+        if scan_data:
+            return {
+                "success": True,
+                "ip": ip,
+                "scan_time": scan_data['scan_time'],
+                "ports": scan_data['ports']
+            }
+        else:
+            return {
+                "success": True,
+                "ip": ip,
+                "scan_time": None,
+                "ports": []
+            }
+    except Exception as e:
+        logger.error(f"Error fetching port scan for {ip}: {e}")
         return {"success": False, "message": str(e)}
 
 @app.websocket("/ws")
@@ -364,11 +476,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 loop = asyncio.get_event_loop()
                 devices = await loop.run_in_executor(None, scan_network)
 
-                # Record scan in database
-                record_scan(len(devices), scan_method="scapy")
+                # Record scan in database and get scan_id
+                scan_id = record_scan(len(devices), scan_method="scapy")
 
                 # Compare with previous scan
-                devices_with_status = compare_devices(devices, state.previous_devices)
+                devices_with_status = compare_devices(devices, state.previous_devices, scan_id=scan_id)
                 new_count = sum(1 for d in devices_with_status if d.get('device_status') == 'new')
                 offline_count = sum(1 for d in devices_with_status if d.get('device_status') == 'offline')
 
