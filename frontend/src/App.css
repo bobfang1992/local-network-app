@@ -438,3 +438,91 @@
 .mb2 { margin-bottom: 1rem; }
 .mb4 { margin-bottom: 2rem; }
 .mt1 { margin-top: 0.5rem; }
+
+
+/* ── 窄屏(手机) ─────────────────────────────────────────────────────────
+ *
+ * 桌面是「主区 + 320px 侧栏」的双栏 + 一张宽表格。手机上这两样都不成立:
+ * 侧栏会把主区挤扁,而表格必然横向溢出、要左右拖着看。
+ *
+ * 窄屏下做两件事:
+ *   1. 双栏拆单栏,**设备列表排在前面** —— 手机上先想看的是「谁在线」,
+ *      不是连接状态
+ *   2. 表格变成一台设备一张卡片:表头收起,每格用 data-label 当行内标题
+ *
+ * ⚠️ 只作用在 .table 上。展开详情里那张端口表、以及 Debug 页那张统计表
+ *    都没有这个 class —— 它们不该被一起卡片化。
+ */
+@media (max-width: 768px) {
+  .container {
+    padding: 0.5rem;
+  }
+
+  .two-column-layout {
+    grid-template-columns: 1fr;
+    gap: 0.75rem;
+  }
+  .main-content { order: 1; }
+  .status-panel { order: 2; }
+
+  .table thead {
+    display: none;
+  }
+  .table,
+  .table tbody,
+  .table tr,
+  .table td {
+    display: block;
+    width: 100%;
+  }
+  .table tr {
+    border: 1px solid #000;
+    margin-bottom: 0.75rem;
+    padding: 0.5rem 0.625rem;
+  }
+  .table td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 0.3rem 0;
+    border: none;
+    text-align: right;
+    word-break: break-word;
+  }
+  .table td::before {
+    content: attr(data-label);
+    font-weight: 600;
+    color: #555;
+    text-align: left;
+    flex: 0 0 auto;
+  }
+  /* 没有 data-label 的格子(主机名、操作按钮)保持整行,不要前缀 */
+  .table td:not([data-label]) {
+    display: block;
+    text-align: left;
+  }
+  .table td:not([data-label])::before {
+    content: none;
+  }
+  /* 主机名是这张卡的标题 */
+  .table td.hostname-cell {
+    font-weight: 600;
+    font-size: 1.05rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid #eee;
+    margin-bottom: 0.3rem;
+  }
+
+  /* 手指点得中:44px 是 Apple 人机界面指南的最小可点尺寸 */
+  .btn-classic,
+  .table button {
+    min-height: 44px;
+    padding: 0.5rem 0.75rem;
+  }
+  /* ⚠️ 输入框字号小于 16px 时,iOS Safari 聚焦会自动放大整个页面 */
+  .table input[type="text"] {
+    min-height: 40px;
+    font-size: 16px;
+  }
+}

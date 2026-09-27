@@ -699,11 +699,11 @@ function App() {
                                 </div>
                               )}
                             </td>
-                            <td>{device.ip}</td>
-                            <td>{device.mac}</td>
-                            <td>{device.vendor || '-'}</td>
-                            <td>{device.status}</td>
-                            <td>
+                            <td data-label="IP">{device.ip}</td>
+                            <td data-label="MAC">{device.mac}</td>
+                            <td data-label="Vendor">{device.vendor || '-'}</td>
+                            <td data-label="Status">{device.status}</td>
+                            <td data-label="Notes">
                               {editingNotes === device.ip ? (
                                 <input
                                   type="text"
