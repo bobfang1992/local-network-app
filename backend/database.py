@@ -271,7 +271,7 @@ def get_total_scans() -> int:
         return result['count'] if result else 0
 
 
-def update_device(ip: str, mac: str, hostname: str, vendor: str = None, is_online: bool = True):
+def update_device(ip: str, mac: str, hostname: str, vendor: str = None, is_online: bool = True, count_offline: bool = True):
     """
     Update or insert device record.
 
@@ -281,6 +281,7 @@ def update_device(ip: str, mac: str, hostname: str, vendor: str = None, is_onlin
         hostname: Device hostname
         vendor: Manufacturer/vendor name (from MAC OUI lookup)
         is_online: Whether device is currently online
+        count_offline: Whether to increment offline counters when offline
     """
     now = datetime.now().isoformat()
 
@@ -303,6 +304,7 @@ def update_device(ip: str, mac: str, hostname: str, vendor: str = None, is_onlin
                         vendor = ?,
                         last_seen = ?,
                         last_seen_online = ?,
+                        total_scans = total_scans + 1,
                         scans_seen_online = scans_seen_online + 1,
                         consecutive_offline = 0,
                         consecutive_online = consecutive_online + 1,
@@ -310,16 +312,26 @@ def update_device(ip: str, mac: str, hostname: str, vendor: str = None, is_onlin
                     WHERE ip = ?
                 """, (mac, hostname, vendor_value, now, now, now, ip))
             else:
-                cursor.execute("""
-                    UPDATE devices SET
-                        last_seen = ?,
-                        vendor = ?,
-                        scans_seen_offline = scans_seen_offline + 1,
-                        consecutive_offline = consecutive_offline + 1,
-                        consecutive_online = 0,
-                        updated_at = ?
-                    WHERE ip = ?
-                """, (now, vendor_value, now, ip))
+                if count_offline:
+                    cursor.execute("""
+                        UPDATE devices SET
+                            last_seen = ?,
+                            vendor = ?,
+                            total_scans = total_scans + 1,
+                            scans_seen_offline = scans_seen_offline + 1,
+                            consecutive_offline = consecutive_offline + 1,
+                            consecutive_online = 0,
+                            updated_at = ?
+                        WHERE ip = ?
+                    """, (now, vendor_value, now, ip))
+                else:
+                    cursor.execute("""
+                        UPDATE devices SET
+                            last_seen = ?,
+                            vendor = ?,
+                            updated_at = ?
+                        WHERE ip = ?
+                    """, (now, vendor_value, now, ip))
         else:
             # Insert new device
             cursor.execute("""
@@ -327,20 +339,22 @@ def update_device(ip: str, mac: str, hostname: str, vendor: str = None, is_onlin
                     ip, mac, hostname, vendor, first_seen, last_seen, last_seen_online,
                     total_scans, scans_seen_online, scans_seen_offline,
                     consecutive_offline, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 0, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                ip, mac, hostname, vendor_value, now, now, now if is_online else None,
+                ip,
+                mac,
+                hostname,
+                vendor_value,
+                now,
+                now,
+                now if is_online else None,
+                1,
                 1 if is_online else 0,
-                1 if is_online else 0,
-                now, now
+                0 if is_online else 1,
+                0 if is_online else 1,
+                now,
+                now
             ))
-
-
-def increment_total_scans():
-    """Increment total_scans counter for all devices"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE devices SET total_scans = total_scans + 1")
 
 
 def get_device_history(ip: str) -> Optional[Dict]:

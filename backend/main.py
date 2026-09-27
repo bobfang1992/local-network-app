@@ -4,7 +4,7 @@ from network_scanner import scan_network
 from port_scanner import scan_ports
 from pi_hole_detector import check_if_pihole
 from database import (
-    init_database, update_device, increment_total_scans,
+    init_database, update_device,
     get_device_history, get_all_known_devices, calculate_device_category,
     record_scan, get_database_stats, get_total_scans, update_device_notes,
     log_categorization, get_categorization_log, save_port_scan_results,
@@ -86,9 +86,6 @@ def compare_devices(current_devices, previous_devices, scan_id: int, grace_scans
 
     Grace period: Devices aren't marked offline until they miss grace_scans consecutive scans.
     """
-    # Increment total scan counter for all known devices
-    increment_total_scans()
-
     # Create lookup by IP address
     prev_ips = {d['ip']: d for d in previous_devices}
     curr_ips = {d['ip']: d for d in current_devices}
@@ -182,24 +179,29 @@ def compare_devices(current_devices, previous_devices, scan_id: int, grace_scans
     # Handle devices that weren't found in current scan (offline devices)
     for ip, prev_device in prev_ips.items():
         if ip not in curr_ips:
-            # Update database (mark as seen but offline)
-            # Get updated history
+            # Increment missed scans counter
+            missed_scans = prev_device.get('missed_scans', 0) + 1
+
+            # Update database (mark as seen but offline) only after grace period for counters
             history = get_device_history(ip)
             vendor = history.get('vendor') if history else None
-
+            count_offline = missed_scans >= grace_scans
             update_device(
                 ip,
                 prev_device.get('mac', 'unknown'),
                 prev_device.get('hostname', 'Unknown'),
                 vendor=vendor,
-                is_online=False
+                is_online=False,
+                count_offline=count_offline
             )
 
-            # Increment missed scans counter
-            missed_scans = prev_device.get('missed_scans', 0) + 1
+            regular_candidate = False
+            if history:
+                recent_streak = history.get('consecutive_online', 0)
+                regular_candidate = calculate_device_category(history, is_online=True, recent_streak=recent_streak)[0] == 'regular'
 
-            # Only show offline devices after grace period
-            if missed_scans >= grace_scans:
+            # Show offline devices after grace period, or immediately if they are regular
+            if missed_scans >= grace_scans or regular_candidate:
                 offline_device = prev_device.copy()
                 offline_device['status'] = 'offline'
                 offline_device['missed_scans'] = missed_scans
@@ -225,6 +227,9 @@ def compare_devices(current_devices, previous_devices, scan_id: int, grace_scans
                     offline_device['ssdp_st'] = history.get('ssdp_st') or ''
                     offline_device['ssdp_usn'] = history.get('ssdp_usn') or ''
                     offline_device['ssdp_scanned_at'] = history.get('ssdp_scanned_at')
+
+                    if regular_candidate and missed_scans < grace_scans:
+                        reason = f"regular device offline (missed {missed_scans} scans) | {reason}"
 
                     # Log categorization for offline device
                     log_categorization(
@@ -328,7 +333,7 @@ async def broadcast(message: dict):
     """Broadcast message to all connected WebSocket clients"""
     disconnected = set()
 
-    for connection in state.active_connections:
+    for connection in list(state.active_connections):
         try:
             await connection.send_json(message)
         except Exception as e:
