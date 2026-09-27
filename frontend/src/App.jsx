@@ -20,6 +20,69 @@ const saveSettings = (settings) => {
   }
 }
 
+/**
+ * 测速历史折线图。内联 SVG,不引图表库 —— 为一条折线装 Chart.js 不值,
+ * 而且那种风格和这个站不搭。
+ *
+ * ⚠️ **X 轴按真实时间,不按第几个点。** 等距排点会把「6 小时一次」和
+ *    「手动连测两次」画成一样宽,于是**图上看不出中间断过** ——
+ *    而「断过」正是看这张图时最该发现的事。
+ *
+ * ⚠️ **失败的那几次画成底部的红点。** 它们在数据里(ok=0),
+ *    跳过不画的话,断网期会变成一段平滑的连线,读起来像一切正常。
+ */
+function SpeedChart({ rows }) {
+  const W = 300, H = 110, PAD = { l: 34, r: 8, t: 8, b: 16 }
+  const good = (rows || []).filter(r => r.ok && r.download_mbps != null)
+  if (good.length < 2) {
+    return (
+      <div style={{ fontSize: '0.75rem', color: '#888', padding: '0.4rem 0' }}>
+        {good.length === 0 ? '还没有数据' : '只有 1 个点 —— 再测一次就能画线了'}
+      </div>
+    )
+  }
+  const t = r => new Date(r.run_at).getTime()
+  const pts = [...good].sort((a, b) => t(a) - t(b))
+  const t0 = t(pts[0]), t1 = t(pts[pts.length - 1])
+  const span = Math.max(1, t1 - t0)
+  const maxY = Math.max(...pts.map(r => Math.max(r.download_mbps, r.upload_mbps || 0))) * 1.15
+  const x = r => PAD.l + ((t(r) - t0) / span) * (W - PAD.l - PAD.r)
+  const y = v => H - PAD.b - (v / maxY) * (H - PAD.t - PAD.b)
+  const line = key => pts.map(r => `${x(r).toFixed(1)},${y(r[key] || 0).toFixed(1)}`).join(' ')
+  const fails = (rows || []).filter(r => !r.ok && t(r) >= t0 && t(r) <= t1)
+  const fmt = ms => {
+    const d = new Date(ms)
+    return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  }
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 'auto' }} role="img"
+           aria-label="测速历史">
+        {[0, maxY / 2, maxY].map((v, i) => (
+          <g key={i}>
+            <line x1={PAD.l} y1={y(v)} x2={W - PAD.r} y2={y(v)} stroke="#e8e8e8" strokeWidth="1" />
+            <text x={PAD.l - 4} y={y(v) + 3} textAnchor="end" fontSize="7" fill="#888">{Math.round(v)}</text>
+          </g>
+        ))}
+        <polyline points={line('download_mbps')} fill="none" stroke="#2f7d54" strokeWidth="1.6" />
+        <polyline points={line('upload_mbps')} fill="none" stroke="#9a7bc8" strokeWidth="1.6"
+                  strokeDasharray="3 2" />
+        {pts.map((r, i) => <circle key={i} cx={x(r)} cy={y(r.download_mbps)} r="1.8" fill="#2f7d54" />)}
+        {/* 失败的测速:底部红点。不画的话断网期会变成一段平滑连线 */}
+        {fails.map((r, i) => <circle key={'f' + i} cx={x(r)} cy={H - PAD.b} r="2.2" fill="#c0392b" />)}
+        <text x={PAD.l} y={H - 4} fontSize="7" fill="#888">{fmt(t0)}</text>
+        <text x={W - PAD.r} y={H - 4} fontSize="7" fill="#888" textAnchor="end">{fmt(t1)}</text>
+      </svg>
+      <div style={{ fontSize: '0.68rem', color: '#666', display: 'flex', gap: '0.75rem' }}>
+        <span><span style={{ color: '#2f7d54' }}>━</span> 下行</span>
+        <span><span style={{ color: '#9a7bc8' }}>┅</span> 上行</span>
+        {fails.length > 0 && <span><span style={{ color: '#c0392b' }}>●</span> 失败 {fails.length}</span>}
+        <span style={{ marginLeft: 'auto' }}>Mbps · {pts.length} 次</span>
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const initialSettings = typeof window !== 'undefined' ? loadSettings() : {}
   const [devices, setDevices] = useState([])
@@ -1171,6 +1234,11 @@ function App() {
                 <span style={{ color: '#888', fontSize: '0.8rem' }}>
                   {speedtest && speedtest.available === false ? '未装 speedtest-cli' : '还没测过'}
                 </span>
+              )}
+              {speedtest?.history?.length > 1 && (
+                <div style={{ marginTop: '0.5rem' }}>
+                  <SpeedChart rows={speedtest.history} />
+                </div>
               )}
               <div>
                 <button
