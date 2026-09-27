@@ -1,5 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from network_scanner import scan_network
 from port_scanner import scan_ports
 from pi_hole_detector import check_if_pihole
@@ -349,8 +351,12 @@ async def startup_event():
     asyncio.create_task(continuous_scanner(interval=30))
     logger.info("Application started - background scanner running")
 
-@app.get("/")
-async def root():
+# ⚠️ This banner used to live at "/" — which silently shadowed the StaticFiles
+#    mount, so the browser got JSON instead of the UI. An explicit route always
+#    wins over a mount, and the symptom is a blank page, not an error. Moved to
+#    /api so "/" belongs to the frontend.
+@app.get("/api")
+async def api_root():
     return {
         "message": "Local Network Device Control Plane API",
         "websocket": "/ws",
@@ -669,5 +675,24 @@ async def websocket_endpoint(websocket: WebSocket):
         state.active_connections.discard(websocket)
         logger.info(f"WebSocket client removed (remaining: {len(state.active_connections)})")
 
+# --- Serve the built frontend from this same process -------------------------
+#
+# Why here and not a separate Vite dev server: behind network.dorafmon.com the
+# page and the API must be same-origin, otherwise the browser resolves
+# "localhost:8000" against *itself*. One process also means one LaunchAgent and
+# no dev server exposed to the tunnel.
+#
+# Mounted last, so every API route and /ws above still wins. html=True makes the
+# SPA fall back to index.html for unknown paths.
+_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if _DIST.is_dir():
+    app.mount("/", StaticFiles(directory=str(_DIST), html=True), name="frontend")
+    logger.info(f"Serving built frontend from {_DIST}")
+else:
+    logger.warning(
+        f"No built frontend at {_DIST} — run `npm run build` in frontend/. "
+        "The API still works; only the UI is missing."
+    )
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)

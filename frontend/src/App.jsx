@@ -58,7 +58,7 @@ function App() {
 
   const connectWebSocket = () => {
     try {
-      const ws = new WebSocket('ws://localhost:8000/ws')
+      const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
       wsRef.current = ws
 
       ws.onopen = () => {
@@ -167,7 +167,7 @@ function App() {
 
   const fetchDbStats = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/database/stats')
+      const response = await fetch('/api/database/stats')
       const data = await response.json()
       setDbStats(data)
     } catch (err) {
@@ -177,7 +177,7 @@ function App() {
 
   const fetchCatLog = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/categorization/log?limit=50')
+      const response = await fetch('/api/categorization/log?limit=50')
       const data = await response.json()
       setCatLog(data)
     } catch (err) {
@@ -187,7 +187,7 @@ function App() {
 
   const updateNotes = async (ip, notes) => {
     try {
-      const response = await fetch(`http://localhost:8000/api/devices/${ip}/notes`, {
+      const response = await fetch(`/api/devices/${ip}/notes`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -223,7 +223,7 @@ function App() {
       setScanningPorts(prev => ({ ...prev, [ip]: true }))
 
       const serviceScan = serviceScanOverride !== undefined ? serviceScanOverride : serviceScanEnabled
-      const response = await fetch(`http://localhost:8000/api/devices/${ip}/scan-ports?timeout=${portScanTimeout}&max_workers=${portScanWorkers}&retries=${portScanRetries}&service_scan=${serviceScan}`, {
+      const response = await fetch(`/api/devices/${ip}/scan-ports?timeout=${portScanTimeout}&max_workers=${portScanWorkers}&retries=${portScanRetries}&service_scan=${serviceScan}`, {
         method: 'POST'
       })
       const data = await response.json()
@@ -257,7 +257,7 @@ function App() {
   const scanOS = async (ip) => {
     try {
       setScanningOS(prev => ({ ...prev, [ip]: true }))
-      const response = await fetch(`http://localhost:8000/api/devices/${ip}/scan-os`, {
+      const response = await fetch(`/api/devices/${ip}/scan-os`, {
         method: 'POST'
       })
       const data = await response.json()
@@ -290,7 +290,7 @@ function App() {
   const scanSSDP = async (ip) => {
     try {
       setScanningSSDP(prev => ({ ...prev, [ip]: true }))
-      const response = await fetch(`http://localhost:8000/api/devices/${ip}/discover-ssdp`, {
+      const response = await fetch(`/api/devices/${ip}/discover-ssdp`, {
         method: 'POST'
       })
       const data = await response.json()
