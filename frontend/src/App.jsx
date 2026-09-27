@@ -27,6 +27,8 @@ function App() {
   const [error, setError] = useState(null)
   const [lastUpdate, setLastUpdate] = useState(null)
   const [connected, setConnected] = useState(false)
+  const [speedtest, setSpeedtest] = useState(null)
+  const [speedRunning, setSpeedRunning] = useState(false)
   const [nextScan, setNextScan] = useState(null)
   const [scanInterval, setScanInterval] = useState(30)
   const [countdown, setCountdown] = useState(null)
@@ -142,6 +144,10 @@ function App() {
   }
 
   useEffect(() => {
+    fetchSpeedtest()
+  }, [])
+
+  useEffect(() => {
     saveSettings({
       activeTab,
       sortColumn,
@@ -164,6 +170,28 @@ function App() {
     startupFullScanEnabled,
     startupFullScanBudgetSec
   ])
+
+  const fetchSpeedtest = async () => {
+    try {
+      const r = await fetch('/api/speedtest?limit=20')
+      const d = await r.json()
+      if (d.success) setSpeedtest(d)
+    } catch (e) {
+      // 取不到测速不该影响别的 —— 这一格留空就好
+    }
+  }
+
+  const runSpeedtestNow = async () => {
+    setSpeedRunning(true)
+    try {
+      await fetch('/api/speedtest/run', { method: 'POST' })
+      await fetchSpeedtest()
+    } catch (e) {
+      // 同上
+    } finally {
+      setSpeedRunning(false)
+    }
+  }
 
   const fetchDbStats = async () => {
     try {
@@ -1120,6 +1148,43 @@ function App() {
         {/* Right column: Status panel */}
         <div className="status-panel">
           <h2 className="panel-title">Status</h2>
+
+          <div className="status-section">
+            <div className="status-label">Internet</div>
+            <div className="status-value">
+              {speedtest?.latest_ok ? (
+                <>
+                  <div style={{ fontSize: '1.05rem' }}>
+                    ↓ {speedtest.latest_ok.download_mbps} &nbsp;·&nbsp; ↑ {speedtest.latest_ok.upload_mbps}{' '}
+                    <span style={{ fontSize: '0.75rem', color: '#666' }}>Mbps</span>
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: '#666', marginTop: '0.15rem' }}>
+                    {speedtest.latest_ok.ping_ms} ms · {String(speedtest.latest_ok.run_at).slice(5, 16).replace('T', ' ')}
+                  </div>
+                  {/* 把测速点显出来:换了服务器数字就不可比,不显示的话这种漂移看不见 */}
+                  <div style={{ fontSize: '0.7rem', color: '#888' }}>
+                    {speedtest.latest_ok.server_sponsor}
+                    {speedtest.latest_ok.server_km ? ' · ' + Math.round(speedtest.latest_ok.server_km) + ' km' : ''}
+                  </div>
+                </>
+              ) : (
+                <span style={{ color: '#888', fontSize: '0.8rem' }}>
+                  {speedtest && speedtest.available === false ? '未装 speedtest-cli' : '还没测过'}
+                </span>
+              )}
+              <div>
+                <button
+                  className="btn-classic"
+                  onClick={runSpeedtestNow}
+                  disabled={speedRunning}
+                  style={{ marginTop: '0.4rem', fontSize: '0.75rem' }}
+                  title="会占满上行几十秒"
+                >
+                  {speedRunning ? '测速中…' : '立即测速'}
+                </button>
+              </div>
+            </div>
+          </div>
 
           <div className="status-section">
             <div className="status-label">Connection</div>
