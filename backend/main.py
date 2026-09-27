@@ -5,8 +5,9 @@ from pathlib import Path
 from network_scanner import scan_network
 from port_scanner import scan_ports
 from pi_hole_detector import check_if_pihole
+import notifier
 from database import (
-    init_database, update_device,
+    DB_PATH, init_database, update_device,
     get_device_history, get_all_known_devices, calculate_device_category,
     record_scan, get_database_stats, get_total_scans, update_device_notes,
     log_categorization, get_categorization_log, save_port_scan_results,
@@ -40,6 +41,20 @@ logger = logging.getLogger(__name__)
 
 # Initialize database
 init_database()
+# 建新设备告警的去重表。
+# ⚠️ 首次创建时用**已有历史里的 MAC 播种** —— 否则第一轮扫描会把库里
+#    每一台都当「新设备」推一遍(现在是 40 台)。
+# ⚠️ 兜住异常:没配 topic、表建不出来,都不该让服务起不来。
+try:
+    _seeded = notifier.init(DB_PATH)
+    if _seeded:
+        logger.info(f"New-device alerting: seeded {_seeded} known MAC(s) from history")
+    logger.info(
+        "New-device alerting: %s",
+        "enabled" if notifier.topic() else "no topic configured (~/.ntfy-topic), staying quiet",
+    )
+except Exception as _exc:
+    logger.warning(f"Could not initialise new-device alerting: {_exc}")
 logger.info("Database initialized")
 
 # Check if running with sudo on macOS
@@ -283,6 +298,14 @@ async def continuous_scanner(interval: int = 30):
 
             # Compare with previous scan to detect changes
             devices_with_status = compare_devices(devices, state.previous_devices, scan_id=scan_id)
+
+            # 新设备告警(ntfy)。⚠️ 放在 compare_devices 之后 —— 那时才有
+            #    vendor / hostname 这些富化字段。
+            # ⚠️ 整段兜住:**告警失败绝不能影响扫描本身**。
+            try:
+                notifier.alert_new_devices(DB_PATH, devices_with_status)
+            except Exception as exc:
+                logger.warning(f"New-device alerting failed, scan unaffected: {exc}")
 
             # Count changes
             new_count = sum(1 for d in devices_with_status if d.get('device_status') == 'new')
