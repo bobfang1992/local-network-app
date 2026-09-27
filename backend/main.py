@@ -695,4 +695,12 @@ else:
     )
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # Defaults to loopback: the intended ingress is a Cloudflare tunnel, and on a
+    # host where the tunnel runs locally there is no reason to listen on the LAN.
+    # LNA_HOST=0.0.0.0 is for the case where the tunnel runs on a *different*
+    # machine and has to reach this one across the LAN — set it in the unit file,
+    # not here, so the safe default stays the default.
+    host = os.environ.get("LNA_HOST", "127.0.0.1")
+    port = int(os.environ.get("LNA_PORT", "8000"))
+    logger.info(f"Listening on {host}:{port}")
+    uvicorn.run(app, host=host, port=port)
