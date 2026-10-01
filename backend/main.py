@@ -405,9 +405,14 @@ async def broadcast(message: dict):
 
 @app.on_event("startup")
 async def startup_event():
-    """Start background scanner on startup"""
+    """Start the background scanner and the speed-test loop on startup."""
     asyncio.create_task(continuous_scanner(interval=30))
-    logger.info("Application started - background scanner running")
+    # ⚠️ speedtest_loop() was written and documented as "every 6 hours" on
+    #    2026-09-27 but never scheduled here, so in three days the only rows in
+    #    `speedtests` were the two manual runs. Defining the coroutine is not
+    #    starting it.
+    asyncio.create_task(speedtest_loop())
+    logger.info("Application started - background scanner and speed-test loop running")
 
 # ⚠️ This banner used to live at "/" — which silently shadowed the StaticFiles
 #    mount, so the browser got JSON instead of the UI. An explicit route always
