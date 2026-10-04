@@ -7,6 +7,8 @@ from port_scanner import scan_ports
 from pi_hole_detector import check_if_pihole
 import notifier
 import speedtest_runner
+import presence
+import sqlite3
 from database import (
     DB_PATH, init_database, update_device,
     get_device_history, get_all_known_devices, calculate_device_category,
@@ -490,6 +492,38 @@ async def get_cat_log(limit: int = 100):
     except Exception as e:
         logger.error(f"Error fetching categorization log: {e}")
         return {"success": False, "message": str(e)}
+
+def _presence_query(fn, *args):
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        return fn(conn, *args)
+    finally:
+        conn.close()
+
+
+@app.get("/api/server-time")
+async def server_time():
+    """库里的时间都是**服务器本地时间、不带时区**(bobrasp2 是 Europe/London)。
+    前端拿这个偏移把它们换成绝对时刻 —— 不换的话浏览器按自己的时区读,纽约看全部快 5 小时。"""
+    return {"success": True, "offset_min": presence.server_offset_min(),
+            "now": datetime.now().astimezone().isoformat()}
+
+
+@app.get("/api/devices/{ip}/presence")
+async def device_presence(ip: str, days: int = 14):
+    """这台设备最近 days 天每小时:扫了几次、出现几次。"""
+    days = max(1, min(days, 60))
+    rows = await asyncio.to_thread(_presence_query, presence.hourly_presence, ip, days)
+    return {"success": True, "ip": ip, "hours": rows}
+
+
+@app.get("/api/presence/events")
+async def presence_events(hours: int = 72, min_away_min: int = 15):
+    """最近 hours 小时的来去记录(离开超过 min_away_min 分钟才算走)。"""
+    hours = max(1, min(hours, 24 * 14))
+    rows = await asyncio.to_thread(_presence_query, presence.recent_events, hours, min_away_min)
+    return {"success": True, "events": rows, "hours": hours, "min_away_min": min_away_min}
+
 
 @app.get("/api/speedtest")
 async def get_speedtest(limit: int = 50):

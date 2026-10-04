@@ -3,6 +3,118 @@ import './App.css'
 
 const SETTINGS_STORAGE_KEY = 'local-network-ui-settings'
 
+/**
+ * 后端存的时间是**服务器本地时间、不带时区**(bobrasp2 是 Europe/London)。浏览器直接 new Date()
+ * 会按自己的时区读 —— 纽约看全部快 5 小时、「几分钟前」永远是 1 分钟(2026-10-03 发现)。
+ * 偏移从 /api/server-time 取;取到之前按浏览器本地时间读(和改之前一样)。
+ */
+let SERVER_OFFSET_MIN = null
+const parseTs = v => {
+  if (v === null || v === undefined || v === '') return null
+  if (typeof v === 'number') return new Date(v)
+  const s = String(v)
+  if (SERVER_OFFSET_MIN === null || /([zZ]|[+-]\d\d:?\d\d)$/.test(s)) return new Date(s)
+  const m = s.match(/^(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d)(?::(\d\d)(?:\.(\d+))?)?/)
+  if (!m) return new Date(s)
+  const ms = m[7] ? Math.round(Number('0.' + m[7]) * 1000) : 0
+  return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0), ms) - SERVER_OFFSET_MIN * 60000)
+}
+const pad2 = n => String(n).padStart(2, '0')
+const fmtTime = v => {
+  const d = parseTs(v)
+  if (!d || isNaN(d)) return '—'
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+const fmtClock = v => {
+  const d = parseTs(v)
+  return d && !isNaN(d) ? `${pad2(d.getHours())}:${pad2(d.getMinutes())}` : '—'
+}
+const fmtDuration = ms => {
+  const m = Math.round(ms / 60000)
+  if (m < 60) return `${Math.max(1, m)} 分钟`
+  if (m < 48 * 60) return `${Math.floor(m / 60)} 小时${m % 60 ? ` ${m % 60} 分` : ''}`
+  return `${Math.round(m / 1440)} 天`
+}
+
+/**
+ * 一台设备最近 14 天的在线情况:一天一行,一小时一格。
+ * 深 = 那个小时大部分扫描都见到它;浅 = 偶尔见到;空 = 扫了但没见到;虚线框 = 那个小时没扫描(监控没在跑)。
+ * ⚠️「没扫描」和「不在」必须分开画 —— 合在一起的话,监控停掉的那几天看起来就像设备全走了。
+ */
+function PresenceGrid({ ip }) {
+  const [rows, setRows] = useState(null)
+  const [err, setErr] = useState(null)
+  useEffect(() => {
+    let alive = true
+    fetch(`/api/devices/${ip}/presence?days=14`).then(r => r.json())
+      .then(d => { if (alive) d.success ? setRows(d.hours) : setErr(d.message || '取不到') })
+      .catch(() => { if (alive) setErr('取不到') })
+    return () => { alive = false }
+  }, [ip])
+  if (err) return <div className="presence-msg">在线历史:{err}</div>
+  if (!rows) return <div className="presence-msg">在线历史加载中…</div>
+  const days = new Map()
+  for (const h of rows) {
+    const d = new Date(h.t)
+    const key = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+    if (!days.has(key)) days.set(key, new Array(24).fill(null))
+    days.get(key)[d.getHours()] = h
+  }
+  const cls = h => {
+    if (!h) return 'future'
+    if (!h.scans) return 'noscan'
+    const r = h.seen / h.scans
+    return r >= 0.5 ? 'on' : r > 0 ? 'some' : 'off'
+  }
+  return (
+    <div className="presence">
+      <div className="presence-hours" aria-hidden="true"><span />{[0, 6, 12, 18].map(h => <i key={h} style={{ gridColumn: h + 2 }}>{h}</i>)}</div>
+      {[...days.entries()].map(([day, hours]) => (
+        <div className="presence-row" key={day}>
+          <span>{day}</span>
+          {hours.map((h, i) => <b key={i} className={cls(h)} title={h ? `${day} ${pad2(i)}:00 · 扫描 ${h.scans} 次,见到 ${h.seen} 次` : ''} />)}
+        </div>
+      ))}
+      <div className="presence-legend"><b className="on" />在 <b className="some" />偶尔 <b className="off" />不在 <b className="noscan" />没扫描</div>
+    </div>
+  )
+}
+
+/** 最近 72 小时谁来了、谁走了。离开超过 15 分钟才算走 —— 手机息屏掉一两次扫描不算。 */
+function PresenceEvents({ onPick }) {
+  const [data, setData] = useState(null)
+  useEffect(() => {
+    let alive = true
+    const load = () => fetch('/api/presence/events?hours=72&min_away_min=15').then(r => r.json())
+      .then(d => { if (alive) setData(d) }).catch(() => { if (alive) setData({ success: false }) })
+    load()
+    const t = setInterval(load, 60000)
+    return () => { alive = false; clearInterval(t) }
+  }, [])
+  if (!data) return <div className="presence-msg">加载中…</div>
+  if (!data.success) return <div className="presence-msg alert-text">取不到来去记录</div>
+  if (!data.events.length) return <div className="presence-msg">最近 72 小时没有设备来去</div>
+  const list = data.events.slice(0, 80)
+  const dayOf = e => fmtTime(e.t).slice(0, 5)
+  return (
+    <ol className="events">
+      {list.map((e, i) => {
+        const head = i === 0 || dayOf(list[i - 1]) !== dayOf(e) ? dayOf(e) : null
+        return (
+          <li key={i}>
+            {head && <div className="ev-day">{head}</div>}
+            <span className="ev-time">{fmtClock(e.t)}</span>
+            <span className={`ev-type ${e.type}`}>{e.type === 'arrive' ? '来了' : '走了'}</span>
+            <button className="ev-name" onClick={() => onPick(e.ip)}>{e.name || '未命名'}</button>
+            <span className="ev-ip">.{e.ip.split('.').pop()}</span>
+            <span className="ev-note">{e.type === 'arrive' ? (e.away_ms ? `离开了 ${fmtDuration(e.away_ms)}` : '这段时间里第一次出现') : ''}</span>
+          </li>
+        )
+      })}
+    </ol>
+  )
+}
+
 const loadSettings = () => {
   try {
     const raw = localStorage.getItem(SETTINGS_STORAGE_KEY)
@@ -41,7 +153,7 @@ function SpeedChart({ rows }) {
       </div>
     )
   }
-  const t = r => new Date(r.run_at).getTime()
+  const t = r => parseTs(r.run_at).getTime()
   const pts = [...good].sort((a, b) => t(a) - t(b))
   const t0 = t(pts[0]), t1 = t(pts[pts.length - 1])
   const span = Math.max(1, t1 - t0)
@@ -118,7 +230,8 @@ function App() {
   const [scanningSSDP, setScanningSSDP] = useState({})
   const [filter, setFilter] = useState('all')
   const [query, setQuery] = useState('')
-  const [panel, setPanel] = useState(null) // null | 'speed' | 'settings'
+  const [panel, setPanel] = useState(null) // null | 'speed' | 'settings' | 'events'
+  const [, setTzReady] = useState(false)
   const wsRef = useRef(null)
   const reconnectTimeoutRef = useRef(null)
   const countdownIntervalRef = useRef(null)
@@ -155,12 +268,11 @@ function App() {
           setDevices(message.devices || [])
 
           if (message.timestamp) {
-            const date = new Date(message.timestamp)
-            setLastUpdate(date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }))
+            setLastUpdate(message.timestamp) // 原样存,显示时再按服务器时区换算
           }
 
           if (message.next_scan) {
-            setNextScan(new Date(message.next_scan))
+            setNextScan(parseTs(message.next_scan))
           }
 
           if (message.scan_interval) {
@@ -211,6 +323,9 @@ function App() {
   }
 
   useEffect(() => {
+    fetch('/api/server-time').then(r => r.json()).then(d => {
+      if (d && typeof d.offset_min === 'number') { SERVER_OFFSET_MIN = d.offset_min; setTzReady(true) }
+    }).catch(() => {})
     fetchSpeedtest()
     // 顶部「见过」要数据库里的设备总数;不在调试页时也拉一次,之后每 5 分钟刷新
     fetchDbStats()
@@ -657,18 +772,11 @@ function App() {
   const isUnnamed = d => !(d.notes || '').trim() && (!d.hostname || d.hostname === 'Unknown')
   // 「要你看一眼」的设备:在线但没名字,或者刚出现(前 3 次扫描)。它们置顶,别让人往下翻才看到
   const needsAttention = d => (d.status === 'online' && isUnnamed(d)) || d.category === 'new'
-  const pad = n => String(n).padStart(2, '0')
   // 「本地管理」的 MAC(第一字节 & 0x02):iPhone/安卓/Mac 的私有 Wi-Fi 地址都是这种,OUI 表里永远查不到
   const isRandomMac = mac => /^[0-9a-f]{2}:/i.test(mac || '') && (parseInt(mac.slice(0, 2), 16) & 2) === 2
-  // 全站统一一种时间格式:MM-DD HH:mm(24 小时制)
-  const fmtTime = v => {
-    if (!v) return '—'
-    const d = new Date(v)
-    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-  }
   const ago = v => {
     if (!v) return ''
-    const m = Math.round((Date.now() - new Date(v).getTime()) / 60000)
+    const m = Math.round((Date.now() - parseTs(v).getTime()) / 60000)
     if (m < 60) return `${Math.max(1, m)} 分钟前`
     if (m < 48 * 60) return `${Math.round(m / 60)} 小时前`
     return `${Math.round(m / 1440)} 天前`
@@ -744,7 +852,7 @@ function App() {
         </button>
         <span className="grow" />
         <span className={`conn ${connected ? 'on' : ''}`} title={connected ? '实时连接正常' : '正在重连后端'}>
-          {connected ? <>上次扫描 {lastUpdate || '—'}<span className="next"> · 下次 {fmtCountdown(countdown)}</span></> : '连接中…'}
+          {connected ? <>上次扫描 {lastUpdate ? fmtClock(lastUpdate) : '—'}<span className="next"> · 下次 {fmtCountdown(countdown)}</span></> : '连接中…'}
         </span>
         <span className="actions">
           <button className="btn ghost" onClick={runSpeedtestNow} disabled={speedRunning} title="会占满上行几十秒">
@@ -767,6 +875,12 @@ function App() {
               {speedAlert && <div className="alert-text">比平时({Math.round(typical)} Mbps)低得多 —— 可能是测的那一刻有大下载,也可能是线路问题,再测一次看看</div>}
             </> : <div>{speedtest && speedtest.available === false ? '未装 speedtest-cli' : '还没测过'}</div>}
           </div>
+        </section>
+      )}
+
+      {panel === 'events' && (
+        <section className="panel events-panel">
+          <PresenceEvents onPick={ip => { setPanel(null); setFilter('all'); setQuery(''); setExpandedDevice(ip) }} />
         </section>
       )}
 
@@ -804,6 +918,7 @@ function App() {
           : <button className="on" onClick={() => setActiveTab('devices')}>← 回到设备</button>}
         {activeTab === 'devices' && filter !== 'all' && <button className="clear" onClick={() => setFilter('all')}>× 只看{{ online: '在线', unnamed: '未命名', offline: '离线' }[filter]},点这里看全部</button>}
         <span className="grow" />
+        <button className={`btn-events ${panel === 'events' ? 'on' : ''}`} onClick={() => setPanel(panel === 'events' ? null : 'events')} aria-expanded={panel === 'events'}>来去</button>
         <button className={`btn-settings ${panel === 'settings' ? 'on' : ''}`} onClick={() => setPanel(panel === 'settings' ? null : 'settings')} aria-expanded={panel === 'settings'}>设置</button>
         <button className={activeTab === 'debug' ? 'on' : ''} onClick={() => setActiveTab(activeTab === 'debug' ? 'devices' : 'debug')}>调试</button>
       </nav>
@@ -879,6 +994,7 @@ function App() {
                           <button className="btn ghost" onClick={() => setEditingNotes(device.ip)}>改备注</button>
                           {portResults?.pihole && <a className="btn ghost" href={portResults.pihole.admin_url} target="_blank" rel="noopener noreferrer">Pi-hole 后台 →</a>}
                         </div></div>
+                        <PresenceGrid ip={device.ip} />
                         {portResults && (
                           <div className="ports">
                             <div className="ports-head">开放端口 · {fmtTime(portResults.scan_time)}

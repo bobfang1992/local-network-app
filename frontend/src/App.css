@@ -135,3 +135,35 @@ tr.detail .acts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: fle
   .panel { grid-template-columns: 1fr; }
   tr.detail > td { padding-left: 12px; }
 }
+
+/* 在线历史(展开行里):一天一行,一小时一格 */
+.presence { margin-top: 14px; font: 11px var(--mono); color: var(--faint); max-width: 560px; }
+.presence-hours, .presence-row { display: grid; grid-template-columns: 44px repeat(24, 1fr); gap: 2px; align-items: center; }
+.presence-hours i { font-style: normal; grid-row: 1; }
+.presence-row { margin-top: 2px; }
+.presence-row b, .presence-legend b { display: block; height: 9px; background: var(--line); }
+.presence-row b.on, .presence-legend b.on { background: var(--ink); }
+.presence-row b.some, .presence-legend b.some { background: var(--faint); }
+.presence-row b.off, .presence-legend b.off { background: var(--line); }
+.presence-row b.noscan, .presence-legend b.noscan { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+.presence-row b.future { background: transparent; }
+.presence-legend { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.presence-legend b { width: 9px; margin-left: 8px; }
+.presence-legend b:first-child { margin-left: 0; }
+.presence-msg { margin-top: 12px; font-size: 12px; color: var(--dim); }
+
+/* 来去记录面板 */
+.events-panel { display: block; max-height: 420px; overflow-y: auto; }
+.events { list-style: none; }
+.events li { display: grid; grid-template-columns: 52px 40px minmax(0, 1fr) 48px 160px; gap: 10px; align-items: baseline; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--ink); }
+.ev-day { grid-column: 1 / -1; font: 600 12px var(--mono); color: var(--dim); padding: 10px 0 2px; }
+.ev-time, .ev-ip { font: 12px var(--mono); color: var(--dim); }
+.ev-type { font-size: 12px; }
+.ev-type.leave { color: var(--faint); }
+.ev-name { text-align: left; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev-name:hover { text-decoration: underline; text-underline-offset: 3px; }
+.ev-note { font-size: 12px; color: var(--dim); }
+@media (max-width: 640px) {
+  .events li { grid-template-columns: 44px 32px minmax(0, 1fr) 40px; }
+  .ev-note { grid-column: 3 / -1; }
+}
