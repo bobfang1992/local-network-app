@@ -658,6 +658,8 @@ function App() {
   // 「要你看一眼」的设备:在线但没名字,或者刚出现(前 3 次扫描)。它们置顶,别让人往下翻才看到
   const needsAttention = d => (d.status === 'online' && isUnnamed(d)) || d.category === 'new'
   const pad = n => String(n).padStart(2, '0')
+  // 「本地管理」的 MAC(第一字节 & 0x02):iPhone/安卓/Mac 的私有 Wi-Fi 地址都是这种,OUI 表里永远查不到
+  const isRandomMac = mac => /^[0-9a-f]{2}:/i.test(mac || '') && (parseInt(mac.slice(0, 2), 16) & 2) === 2
   // 全站统一一种时间格式:MM-DD HH:mm(24 小时制)
   const fmtTime = v => {
     if (!v) return '—'
@@ -850,7 +852,9 @@ function App() {
                         </div>
                       </td>
                       <td className="c-mac">{device.mac || '—'}</td>
-                      <td className="c-ven">{device.vendor || '—'}</td>
+                      <td className="c-ven">{device.vendor || (isRandomMac(device.mac)
+                        ? <span title="手机/电脑为隐私随机生成的地址(第一字节第 2 位是 1),查不到厂商">随机地址</span>
+                        : '—')}</td>
                       <td className="c-rate">{!online
                         ? (device.last_seen ? `${ago(device.last_seen)}见过` : '离线')
                         : (rate !== null && rate < 0.995 ? `${Math.round(rate * 100)}%` : '')}</td>
